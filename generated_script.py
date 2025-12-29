@@ -1,1 +1,1 @@
-# あなたのPythonコードをここに記述してください。
+print("Hello, World!")
