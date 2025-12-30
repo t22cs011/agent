@@ -11,11 +11,18 @@ HAS_FRAMEWORK = True
 IMPORT_ERROR_MSG = ''
 try:
     from langgraph.graph import StateGraph, END
-    from langchain_core.messages import HumanMessage, BaseMessage
+    from langchain_core.messages import HumanMessage, BaseMessage, SystemMessage
 except Exception as e:
     HAS_FRAMEWORK = False
     IMPORT_ERROR_MSG = str(e)
     # We'll provide a fallback interactive loop later so the script still accepts input.
+
+EEG_TOOL_IMPORT_ERROR: str | None = None
+try:
+    from tools import eeg_experiment
+except Exception as exc:
+    eeg_experiment = None  # type: ignore[assignment]
+    EEG_TOOL_IMPORT_ERROR = str(exc)
 
 # ==========================================
 # ⚙️ 設定セクション
@@ -40,6 +47,13 @@ if not os.path.exists(WORKSPACE_DIR):
 
 print(f"🚀 Initializing Agent with {LLM_MODEL}...")
 print(f"🐍 Target Python: {TARGET_PYTHON}")
+
+EEG_TOOL_SPEC = """ツール run_eeg_experiment(overrides: dict, run_label: str | None = None, dry_run: bool = False, python_executable: str | None = None) を使って /home/kawamura/bci_project/braindecodetest/experiments/train_cv.py を呼び出します。
+- overrides にはホワイトリスト (seed, n_splits, batch_size, epochs, patience, lr, cache_root, subject_ids など) を使ってパラメータを指定してください。
+- 設定や想定コマンドに確信を持つまで、**必ず dry_run=True で実行し、config.json の場所と planned_cmd を確認**してから dry_run=False での実行に移ってください。
+- このツールは安全のため trusted python 実行環境 (`TARGET_PYTHON`) を使って train_cv.py をサブプロセスで起動します。
+- 返り値は JSON 形式（辞書）で、`run_dir`, `config_path`, `planned_cmd`, `log_path`, `stdout_tail`, `stderr_tail`, `exit_code`, `metrics`, `error` などのキーを含みます。これを公式ステータスとして扱い、次のアクションや報告にも JSON 内容を引用してください。
+- `metrics` にはログから抽出された `overall_mean_acc` が含まれます。"""
 
 
 # --- 事前チェック: GPU と Ollama モデルの存在確認 ---
@@ -394,8 +408,15 @@ if FULL_AGENT:
 
                 print("\n--- 🤖 Agent Working ---")
                 
+                tool_note = ""
+                if EEG_TOOL_IMPORT_ERROR:
+                    tool_note = f"\n※ tools.eeg_experiment の読み込みで次のエラーが発生しました: {EEG_TOOL_IMPORT_ERROR}"
+
                 initial_state = {
-                    "messages": [HumanMessage(content=user_input)],
+                    "messages": [
+                        SystemMessage(content=EEG_TOOL_SPEC + tool_note),
+                        HumanMessage(content=user_input)
+                    ],
                     "code_filename": "generated_script.py",
                     "iterations": 0
                 }
