@@ -239,8 +239,17 @@ def run_eeg_experiment(
     config_path = run_dir / "config.json"
     _write_config(config, config_path)
 
-    python_bin = python_executable or os.environ.get("TARGET_PYTHON", TARGET_PYTHON)
-    cmd = [python_bin, str(script_path), "--config", str(config_path)]
+    python_cmd = python_executable or "python"
+    cmd = [
+        "docker",
+        "exec",
+        "-i",
+        "bci",
+        python_cmd,
+        str(script_path),
+        "--config",
+        str(config_path),
+    ]
 
     planned = {
         "run_dir": str(run_dir),

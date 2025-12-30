@@ -1,0 +1,22 @@
+services:
+  bci:
+    image: bci-image:latest
+    build: .
+    container_name: bci
+    working_dir: /app
+    volumes:
+      - ./:/app
+    # GPU 設定を一時的に外した CPU フォールバック構成
+    # GPU 利用環境が整い次第、device_requests を追加してください
+    shm_size: "8gb"
+    tty: true
+    command: ["tail", "-f", "/dev/null"]
+    # GPU reservation for environments using Docker Engine with NVIDIA runtime
+    # Note: some 'docker compose' validators may reject 'deploy' in non-swarm mode.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
