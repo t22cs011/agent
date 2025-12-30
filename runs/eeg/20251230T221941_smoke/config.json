@@ -1,0 +1,29 @@
+{
+  "seed": 20240610,
+  "n_splits": 10,
+  "batch_size": 128,
+  "epochs": 1,
+  "patience": 20,
+  "lr": 0.001,
+  "cache_root": "/home/kawamura/bci_project/braindecodetest/data/preprocessed_mixed_256hz_v2",
+  "subject_ids": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "aug_prob": 0.5,
+  "snr_segments": 4,
+  "snr_aug_multiplier": 9
+}
