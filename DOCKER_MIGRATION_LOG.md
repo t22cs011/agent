@@ -55,4 +55,4 @@ EEG Conformerを用いた言語デコーディング研究（BCI Competition 202
 
 ## 5. 次のステップ
 - ダミーの `bci_code/train_cv.py` を、実際のBraindecodeを用いた本番用学習コードに置き換える。
-- Agentによる自律的なパラメータ探索実験を開始する。
+- Agentによる自律的な実験の修正を開始する。
