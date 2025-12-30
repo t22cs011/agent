@@ -37,6 +37,19 @@
 
 本プロジェクトは Controller（意思決定）と Worker（実験実行）を明確に分離した二層構造です。
 
+## 2.1. Directory Structure & Data Locations (重要)
+本プロジェクトは、AgentのコードとBCI研究の本番データ/コードが別ディレクトリに分かれています。Docker環境から本番データにアクセスするには、適切なボリュームマウントが必要です。
+
+- **Agent Root (`/home/kawamura/agent`)**
+  - **内容:** Agentのソースコード、`docker-compose.yml`、`STATUS.md`
+  - **Dockerマウント:** コンテナ内の `/app` にマウントされています。
+  - **役割:** 実験の制御、ログの収集。
+
+- **BCI Project Root (`/home/kawamura/bci_project/braindecodetest`)**
+  - **内容:** BCI 2020用の本番ソースコード、および大規模データセット（`data/`）
+  - **Dockerマウント:** **デフォルトではマウントされていません。**
+  - **役割:** 学習データの提供。本番実験を行う際は、このディレクトリをコンテナ（例: `/mnt/bci_source`）にマウントし、そこからデータを読み込む必要があります。
+
 - **Hardware:** Server `Cygnus`（Ubuntu、Titan RTX 24GB VRAM）
 - **Controller (Agent):**
   - **Stack:** LangGraph + Ollama（`deepseek-r1:14b`）
