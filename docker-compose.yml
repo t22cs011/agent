@@ -6,6 +6,7 @@ services:
     working_dir: /app
     volumes:
       - ./:/app
+      - /home/kawamura/bci_project/braindecodetest/:/mnt/bci_source:ro
     # GPU 設定を一時的に外した CPU フォールバック構成
     # GPU 利用環境が整い次第、device_requests を追加してください
     shm_size: "8gb"

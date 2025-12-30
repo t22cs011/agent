@@ -7,6 +7,7 @@ import argparse
 import sys
 import logging
 import json
+import pickle
 from pathlib import Path
 from typing import Tuple
 
@@ -49,10 +50,10 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--subject_ids", type=int, nargs='+', default=[1])
-    parser.add_argument("--cache_root", type=str, default="/app/data/mne_data")
+    parser.add_argument("--cache_root", type=str, default="/mnt/bci_source/data/preprocessed_mixed_256hz_v2")
     parser.add_argument("--aug_prob", type=float, default=0.5, help="Augmentation probability")
     parser.add_argument("--config", type=str, help="Path to JSON config produced by tools.eeg_experiment")
-    parser.add_argument("--data_root", type=str, default="/app/data", help="Root directory for language decoding data")
+    parser.add_argument("--data_root", type=str, default="/mnt/bci_source/data/preprocessed_mixed_256hz_v2", help="Root directory for language decoding data")
     parser.add_argument("--classes", type=int, nargs='+', help="Optional class ids for language decoding labels")
 
     # Internal flags
@@ -83,6 +84,7 @@ def load_config(args: argparse.Namespace) -> argparse.Namespace:
 def _select_npz(data_root: Path) -> Tuple[np.ndarray, np.ndarray]:
     """Pick the first NPZ with X/y keys if available."""
     if not data_root.exists():
+        log.warning(f"Data root does not exist: {data_root}")
         return None, None  # type: ignore[return-value]
     for path in sorted(data_root.rglob("*.npz")):
         try:
@@ -98,15 +100,43 @@ def _select_npz(data_root: Path) -> Tuple[np.ndarray, np.ndarray]:
     return None, None  # type: ignore[return-value]
 
 
-def load_or_synthesize_data(args: argparse.Namespace) -> Tuple[np.ndarray, np.ndarray]:
+def load_or_synthesize_data(args: argparse.Namespace) -> Tuple[np.ndarray, np.ndarray, float]:
     """Load language decoding data if present; otherwise synthesize."""
     data_root = Path(args.data_root)
+
     if not args.dry_run:
-        X, y = _select_npz(data_root)
-        if X is not None and y is not None:
-            X = np.asarray(X, dtype=np.float32)
-            y = np.asarray(y, dtype=np.int64)
-            return X, y
+        loaded_subjects = []
+        for sid in args.subject_ids:
+            fname = f"S{sid:02d}_preprocessed_with_test.pkl"
+            path = data_root / fname
+            if not path.exists():
+                log.warning(f"Subject file missing: {path}")
+                continue
+            try:
+                with open(path, "rb") as f:
+                    payload = pickle.load(f)
+                X = np.concatenate([payload["X_train"], payload["X_val"]], axis=0)
+                y = np.concatenate([payload["y_train"], payload["y_val"]], axis=0)
+                sfreq = float(payload.get("sfreq", 250.0))
+                loaded_subjects.append((X.astype(np.float32), y.astype(np.int64), sfreq))
+                log.info(f"Loaded subject {sid:02d} from {path}")
+            except Exception as exc:
+                log.error(f"Failed to load {path}: {exc}")
+                continue
+
+        if loaded_subjects:
+            X_all = np.concatenate([item[0] for item in loaded_subjects], axis=0)
+            y_all = np.concatenate([item[1] for item in loaded_subjects], axis=0)
+            sfreq = loaded_subjects[0][2]
+            log.info(f"Using mounted dataset at {data_root}; subjects={len(loaded_subjects)}; trials={X_all.shape[0]}")
+            return X_all, y_all, sfreq
+
+        X_npz, y_npz = _select_npz(data_root)
+        if X_npz is not None and y_npz is not None:
+            X_npz = np.asarray(X_npz, dtype=np.float32)
+            y_npz = np.asarray(y_npz, dtype=np.int64)
+            log.info(f"Using NPZ dataset at {data_root}")
+            return X_npz, y_npz, 250.0
 
     rng = np.random.default_rng(args.seed)
     synth_trials = 12 if args.dry_run else 64
@@ -118,7 +148,7 @@ def load_or_synthesize_data(args: argparse.Namespace) -> Tuple[np.ndarray, np.nd
     log.warning("WARNING: Using Synthetic Data for Language Decoding Test")
     X = rng.standard_normal((synth_trials, synth_channels, synth_times), dtype=np.float32)
     y = rng.integers(0, n_classes, size=synth_trials, endpoint=False, dtype=np.int64)
-    return X, y
+    return X, y, 250.0
 
 
 def make_splits(X: np.ndarray, y: np.ndarray, val_ratio: float = 0.2) -> Tuple[TensorDataset, TensorDataset]:
@@ -158,14 +188,19 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # --- 1. Dataset Loading (Language Decoding) ---
-    X, y_raw = load_or_synthesize_data(args)
+    X, y_raw, sfreq = load_or_synthesize_data(args)
     y, classes = normalize_labels(y_raw)
     n_trials, n_channels, n_times = X.shape
+    target_times = 1000 if n_times < 1000 else n_times
+    if target_times != n_times:
+        pad = target_times - n_times
+        X = np.pad(X, ((0, 0), (0, 0), (0, pad)), mode="constant")
+        n_times = target_times
+        log.info(f"Padded time dimension to {n_times} samples for model compatibility")
     n_classes = len(classes)
     log.info(f"Data prepared: trials={n_trials}, channels={n_channels}, time={n_times}, classes={n_classes}")
 
     # --- 2. Model Definition (EEG Conformer) ---
-    sfreq = 250.0
     log.info(f"Building EEG Conformer (Ch={n_channels}, Classes={n_classes}, Sfreq={sfreq})")
     model = EEGConformer(
         n_outputs=n_classes,
@@ -182,6 +217,8 @@ def main():
     # --- 3. Training Loop ---
     train_ds, valid_ds = make_splits(X, y)
 
+    t_max = max(1, args.epochs - 1)
+
     clf = EEGClassifier(
         model,
         criterion=torch.nn.CrossEntropyLoss,
@@ -192,7 +229,7 @@ def main():
         batch_size=args.batch_size,
         callbacks=[
             "accuracy",
-            ("lr_scheduler", LRScheduler('CosineAnnealingLR', T_max=args.epochs - 1)),
+            ("lr_scheduler", LRScheduler('CosineAnnealingLR', T_max=t_max)),
             ("early_stopping", EarlyStopping(monitor='valid_loss', patience=args.patience)),
         ],
         device=device,
