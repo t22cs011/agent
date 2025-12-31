@@ -560,7 +560,7 @@ def _configure_mlflow() -> None:
 def main():
     args = _parse_args()
     # allow CLI overrides for quick verification runs
-    global SUBJECT_IDS, N_FOLDS, MAX_EPOCHS, RESULTS_ROOT, BATCH_SIZE
+    global SUBJECT_IDS, N_FOLDS, MAX_EPOCHS, RESULTS_ROOT, BATCH_SIZE, SKIP_CHECKPOINTS
     if args.subjects:
         parsed = []
         for token in args.subjects.split(","):
