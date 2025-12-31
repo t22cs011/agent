@@ -18,11 +18,34 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
+import mlflow
 
 warnings.filterwarnings("ignore", message=".*Tensorflow.*")
 
+def _resolve_data_root() -> str:
+    env_root = os.environ.get("BCI_DATA_ROOT")
+    candidates = []
+    if env_root:
+        candidates.append(env_root)
+    candidates.extend([
+        "/mnt/bci_source/data/preprocessed_mixed_256hz_v2",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "preprocessed_mixed_256hz_v2")),
+        os.path.abspath(os.path.join(os.getcwd(), "data", "preprocessed_mixed_256hz_v2")),
+    ])
+    seen = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if os.path.isdir(candidate):
+            print(f"[info] Using dataset root: {candidate}")
+            return candidate
+    fallback = candidates[0] if candidates else "/mnt/bci_source/data/preprocessed_mixed_256hz_v2"
+    print(f"[warn] No dataset root exists; falling back to {fallback}")
+    return fallback
+
 # --- Configuration ---
-DATA_ROOT = "/mnt/bci_source/data/preprocessed_mixed_256hz_v2"
+DATA_ROOT = _resolve_data_root()
 # Use a workspace-local results folder by default (avoid creating '/runs')
 RESULTS_ROOT = os.environ.get("RESULTS_ROOT", "runs")
 
@@ -309,6 +332,20 @@ def _aggregate_probs_and_loss(model, loader, criterion):
     return preds, gts, mean_loss
 
 
+def _log_epoch_metrics(epoch, train_loss, train_acc, val_loss, val_acc):
+    if not mlflow.active_run():
+        return
+    mlflow.log_metrics(
+        {
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+        },
+        step=epoch,
+    )
+
+
 def _save_checkpoint(path, model, optimizer, scheduler, epoch, best_acc, history, patience_counter):
     torch.save(
         {
@@ -455,6 +492,8 @@ def train_model(
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
 
+        _log_epoch_metrics(epoch, train_loss_mean, train_acc, val_loss, val_acc)
+
         print(
             f"Epoch {epoch}/{MAX_EPOCHS} | train_loss={train_loss_mean:.4f} train_acc={train_acc:.4f} "
             f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
@@ -486,7 +525,16 @@ def train_model(
     return best_acc, history, (test_preds, test_targets), (val_preds, val_targets), best_epoch
 
 
+def _configure_mlflow() -> None:
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow_server:5000")
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "EEGConformer")
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(experiment_name)
+    print(f"[info] MLflow tracking URI set to {tracking_uri}, experiment '{experiment_name}'")
+
+
 def main():
+    _configure_mlflow()
     results_dir = ensure_results_dir()
     results = []
 
@@ -511,32 +559,60 @@ def main():
                 print(f"Training {model_name}...")
                 model_run_dir = os.path.join(results_dir, f"S{subject_id:02d}", f"fold{fold+1:02d}", model_name)
                 test_acc_val = None
+                acc = 0.0
+                history = {}
+                test_preds_targets = (None, None)
+                val_preds_targets = (None, None)
+                best_epoch = None
 
-                try:
-                    acc, history, test_preds_targets, val_preds_targets, best_epoch = train_model(
-                        model_name,
-                        X_train,
-                        y_train,
-                        X_val,
-                        y_val,
-                        X_test,
-                        y_test,
-                        n_classes,
-                        n_chans,
-                        window_size=CROP_WINDOW,
-                        ckpt_dir=os.path.join(model_run_dir, "checkpoints"),
-                    )
-                except Exception as e:
-                    print(f"[warn] {model_name} crashed: {e}; skipping and continuing.")
-                    acc = 0.0
-                    history = {}
-                    test_preds_targets = (None, None)
-                    val_preds_targets = (None, None)
-                    best_epoch = None
-                else:
+                run_name = f"S{subject_id:02d}_fold{fold+1}_{model_name}"
+                with mlflow.start_run(run_name=run_name):
+                    mlflow.log_params({
+                        "subject_id": subject_id,
+                        "model_name": model_name,
+                        "fold": fold + 1,
+                        "batch_size": BATCH_SIZE,
+                        "window_size": CROP_WINDOW,
+                        "n_splits": N_FOLDS,
+                        "learning_rate": LR,
+                        "data_root": DATA_ROOT,
+                        "results_dir": results_dir,
+                    })
+                    try:
+                        acc, history, test_preds_targets, val_preds_targets, best_epoch = train_model(
+                            model_name,
+                            X_train,
+                            y_train,
+                            X_val,
+                            y_val,
+                            X_test,
+                            y_test,
+                            n_classes,
+                            n_chans,
+                            window_size=CROP_WINDOW,
+                            ckpt_dir=os.path.join(model_run_dir, "checkpoints"),
+                        )
+                    except Exception as e:
+                        print(f"[warn] {model_name} crashed: {e}; skipping and continuing.")
+                        acc = 0.0
+                        history = {}
+                        test_preds_targets = (None, None)
+                        val_preds_targets = (None, None)
+                        best_epoch = None
+                        mlflow.set_tag("training.status", "failed")
+                        mlflow.log_param("training.error", str(e))
+                    else:
+                        mlflow.set_tag("training.status", "completed")
                     preds_te, targets_te = test_preds_targets
                     if preds_te is not None and targets_te is not None and len(preds_te) > 0:
                         test_acc_val = float(np.mean(np.equal(preds_te, targets_te)))
+                    if mlflow.active_run():
+                        mlflow.log_metric("best_val_acc", acc)
+                        if best_epoch is not None:
+                            mlflow.log_metric("best_epoch", best_epoch)
+                        if test_acc_val is not None:
+                            mlflow.log_metric("test_accuracy", test_acc_val)
+                        mlflow.log_metric("epochs_trained", len(history.get("train_loss", [])))
 
                 # Save history CSV/JSON
                 os.makedirs(model_run_dir, exist_ok=True)
