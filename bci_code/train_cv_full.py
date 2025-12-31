@@ -1,4 +1,5 @@
 import sys
+import argparse
 import os
 import pickle
 import warnings
@@ -44,6 +45,16 @@ def _resolve_data_root() -> str:
     print(f"[warn] No dataset root exists; falling back to {fallback}")
     return fallback
 
+
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Train CV runner with lightweight debug options")
+    parser.add_argument("--subjects", "-s", help="Comma-separated subject IDs or ranges (e.g. 1,3-5)", default=None)
+    parser.add_argument("--n-folds", type=int, help="Number of folds to use (overrides N_FOLDS)", default=None)
+    parser.add_argument("--max-epochs", type=int, help="Max epochs (overrides MAX_EPOCHS)", default=None)
+    parser.add_argument("--results-root", help="Override RESULTS_ROOT directory", default=None)
+    parser.add_argument("--dry-run", action="store_true", help="Run a very small quick check (1 subject, few epochs)")
+    return parser.parse_args()
+
 # --- Configuration ---
 DATA_ROOT = _resolve_data_root()
 # Use a workspace-local results folder by default (avoid creating '/runs')
@@ -58,6 +69,8 @@ PATIENCE = 20
 BATCH_SIZE = 16
 LR = 0.000625  # 一般的なBraindecodeのデフォルト
 WEIGHT_DECAY = 0
+# When True, do not load existing checkpoints (useful for dry-run / quick checks)
+SKIP_CHECKPOINTS = False
 
 # Data Shapes
 N_TIME_POINTS = 512  # 1 trial = 512 samples (2s @256Hz)
@@ -127,12 +140,17 @@ MODELS = {
     ),
 }
 
-# Require GPU by default. Exit early if CUDA is unavailable.
-DEVICE = torch.device("cuda")
-if not torch.cuda.is_available():
-    print("[error] CUDA is not available; GPU is required. Exiting.")
-    sys.exit(1)
-print(f"[info] Using device: {DEVICE}")
+# Device selection: allow forcing CPU via env `BCI_FORCE_CPU` or fallback to CPU when CUDA unavailable.
+force_cpu_env = os.environ.get("BCI_FORCE_CPU", "0").lower()
+FORCE_CPU = force_cpu_env in ("1", "true", "yes")
+if FORCE_CPU:
+    DEVICE = torch.device("cpu")
+else:
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if DEVICE.type == "cpu":
+    print("[warn] Using CPU device (BCI_FORCE_CPU=%s)" % (force_cpu_env,))
+else:
+    print(f"[info] Using device: {DEVICE}")
 
 # Limit thread count to reduce instability on noisy hardware
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -363,6 +381,12 @@ def _save_checkpoint(path, model, optimizer, scheduler, epoch, best_acc, history
 
 
 def _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler):
+    # Respect global SKIP_CHECKPOINTS for quick/dry-run modes
+    try:
+        if SKIP_CHECKPOINTS:
+            return 1, 0.0, None, {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}, 0
+    except NameError:
+        pass
     if not os.path.isdir(ckpt_dir):
         return 1, 0.0, None, {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}, 0
     candidates = [f for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
@@ -534,6 +558,41 @@ def _configure_mlflow() -> None:
 
 
 def main():
+    args = _parse_args()
+    # allow CLI overrides for quick verification runs
+    global SUBJECT_IDS, N_FOLDS, MAX_EPOCHS, RESULTS_ROOT, BATCH_SIZE
+    if args.subjects:
+        parsed = []
+        for token in args.subjects.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            if "-" in token:
+                a, b = token.split("-")
+                parsed.extend(list(range(int(a), int(b) + 1)))
+            else:
+                parsed.append(int(token))
+        SUBJECT_IDS = parsed
+    if args.n_folds:
+        N_FOLDS = args.n_folds
+    if args.max_epochs:
+        MAX_EPOCHS = args.max_epochs
+    if args.results_root:
+        RESULTS_ROOT = args.results_root
+    if args.dry_run:
+        # minimal run: single subject, 2 folds, 1 epoch
+        if isinstance(SUBJECT_IDS, range):
+            SUBJECT_IDS = [SUBJECT_IDS[0]]
+        elif isinstance(SUBJECT_IDS, list) and len(SUBJECT_IDS) > 0:
+            SUBJECT_IDS = [SUBJECT_IDS[0]]
+        else:
+            SUBJECT_IDS = [1]
+        N_FOLDS = 2
+        MAX_EPOCHS = 1
+        BATCH_SIZE = max(4, BATCH_SIZE // 4)
+        # avoid loading/resuming from checkpoints during dry-run
+        SKIP_CHECKPOINTS = True
+
     _configure_mlflow()
     results_dir = ensure_results_dir()
     results = []

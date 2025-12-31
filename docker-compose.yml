@@ -17,7 +17,8 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=http://host.docker.internal:11434
-      - MLFLOW_TRACKING_URI=http://mlflow_server:5000
+      - MLFLOW_TRACKING_URI=file:///tmp/mlruns
+      - MPLCONFIGDIR=/tmp/matplotlib
     user: "10151:200"
 
   mlflow_server:
