@@ -1,0 +1,9 @@
+{
+  "remoteUser": "vscode",
+  "containerUser": "vscode",
+  "remoteEnv": {
+    "HOME": "/home/vscode",
+    "VSCODE_AGENT_FOLDER": "/home/vscode/.vscode-server"
+  },
+  "workspaceFolder": "/app"
+}

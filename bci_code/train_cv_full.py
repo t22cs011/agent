@@ -2,25 +2,37 @@ import sys
 import os
 import pickle
 import warnings
+import faulthandler
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import KFold
+from sklearn.metrics import confusion_matrix
 from braindecode.models import EEGConformer, ShallowFBCSPNet, Deep4Net, EEGNetv4
 import pandas as pd
 from datetime import datetime
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 warnings.filterwarnings("ignore", message=".*Tensorflow.*")
 
 # --- Configuration ---
 DATA_ROOT = "/mnt/bci_source/data/preprocessed_mixed_256hz_v2"
+# Use a workspace-local results folder by default (avoid creating '/runs')
+RESULTS_ROOT = os.environ.get("RESULTS_ROOT", "runs")
+
+# Ensure base results directory exists early (used by faulthandler)
+os.makedirs(RESULTS_ROOT, exist_ok=True)
 SUBJECT_IDS = range(1, 16)  # S01 to S15
 N_FOLDS = 10
 MAX_EPOCHS = 200
 PATIENCE = 20
-BATCH_SIZE = 32
+BATCH_SIZE = 16
 LR = 0.000625  # 一般的なBraindecodeのデフォルト
 WEIGHT_DECAY = 0
 
@@ -41,7 +53,7 @@ def _build_shallow(n_outputs, n_chans, n_times):
     return ShallowFBCSPNet(
         n_outputs=n_outputs,
         n_chans=n_chans,
-        input_window_samples=n_times,
+        n_times=n_times,
         sfreq=256,
         n_filters_time=20,
         n_filters_spat=20,
@@ -76,14 +88,14 @@ MODELS = {
     "DeepNet": lambda n_outputs, n_chans, n_times: Deep4Net(
         n_outputs=n_outputs,
         n_chans=n_chans,
-        input_window_samples=n_times,
+        n_times=n_times,
         sfreq=256,
         drop_prob=0.5,
     ),
     "EEGNet": lambda n_outputs, n_chans, n_times: EEGNetv4(
         n_outputs=n_outputs,
         n_chans=n_chans,
-        input_window_samples=n_times,
+        n_times=n_times,
         sfreq=256,
         F1=8,
         D=2,
@@ -92,16 +104,29 @@ MODELS = {
     ),
 }
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Require GPU by default. Exit early if CUDA is unavailable.
+DEVICE = torch.device("cuda")
+if not torch.cuda.is_available():
+    print("[error] CUDA is not available; GPU is required. Exiting.")
+    sys.exit(1)
+print(f"[info] Using device: {DEVICE}")
 
 # Limit thread count to reduce instability on noisy hardware
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 torch.set_num_threads(1)
 
+# Enable faulthandler to capture native tracebacks on crash
+try:
+    faulthandler.enable()
+    _fh_log = open(os.path.join(RESULTS_ROOT, "faulthandler.log"), "a", encoding="utf-8")
+    faulthandler.enable(file=_fh_log)
+except Exception:
+    pass
 
-def ensure_results_dir(preferred_dir="/tmp/results", fallback_dir="/tmp"):
-    """Choose a writable directory for results, preferring /tmp/results."""
+
+def ensure_results_dir(preferred_dir=RESULTS_ROOT, fallback_dir="/tmp/results"):
+    """Choose a writable directory for results, preferring configured RESULTS_ROOT."""
     for candidate in (preferred_dir, fallback_dir):
         try:
             os.makedirs(candidate, exist_ok=True)
@@ -118,7 +143,12 @@ def ensure_results_dir(preferred_dir="/tmp/results", fallback_dir="/tmp"):
 
 
 def load_subject_data(subject_id):
-    """Load subject data with flexible key names and concatenate train/val/test if present."""
+    """Load subject data with flexible key names.
+
+    Returns:
+        X_trainval, y_trainval: concatenated train+val
+        X_test, y_test: optional test split (may be None if missing)
+    """
     file_path = os.path.join(DATA_ROOT, f"S{subject_id:02d}_preprocessed_with_test.pkl")
     print(f"[debug][S{subject_id:02d}] Looking for file: {file_path}")
     if not os.path.exists(file_path):
@@ -154,8 +184,10 @@ def load_subject_data(subject_id):
                 return k, data[k]
         return None, None
 
-    xs = []
-    ys = []
+    xs_trainval = []
+    ys_trainval = []
+    xs_test = []
+    ys_test = []
 
     for split_name, x_keys, y_keys in split_key_options:
         x_key, x_arr = pick_first(x_keys)
@@ -165,8 +197,12 @@ def load_subject_data(subject_id):
             x_shape = getattr(x_arr, "shape", "n/a")
             y_shape = getattr(y_arr, "shape", "n/a")
             print(f"    [debug][S{subject_id:02d}] {split_name}: {x_key} shape={x_shape}, {y_key} shape={y_shape}")
-            xs.append(x_arr)
-            ys.append(y_arr)
+            if split_name == "test":
+                xs_test.append(x_arr)
+                ys_test.append(y_arr)
+            else:
+                xs_trainval.append(x_arr)
+                ys_trainval.append(y_arr)
         elif x_key and not y_key:
             print(f"    [warn][S{subject_id:02d}] Found {x_key} but missing label key among {y_keys}")
         elif y_key and not x_key:
@@ -174,26 +210,26 @@ def load_subject_data(subject_id):
         else:
             print(f"    [debug][S{subject_id:02d}] No data found for split '{split_name}'")
 
-    if not xs or not ys:
+    if not xs_trainval or not ys_trainval:
         print(f"[warn][S{subject_id:02d}] No feature/label arrays collected; skipping subject")
-        return None, None
+        return None, None, None, None
 
     try:
-        X = np.concatenate(xs, axis=0)
-        y = np.concatenate(ys, axis=0)
+        X = np.concatenate(xs_trainval, axis=0)
+        y = np.concatenate(ys_trainval, axis=0)
     except Exception as e:
         print(f"[error][S{subject_id:02d}] Failed to concatenate arrays: {e}")
-        return None, None
+        return None, None, None, None
 
     if X.ndim != 3:
         print(f"[warn][S{subject_id:02d}] X has unexpected ndim={X.ndim}; expected 3")
-        return None, None
+        return None, None, None, None
     if y.ndim != 1:
         print(f"[warn][S{subject_id:02d}] y has unexpected ndim={y.ndim}; expected 1")
-        return None, None
+        return None, None, None, None
     if X.shape[0] != y.shape[0]:
         print(f"[warn][S{subject_id:02d}] Mismatch between samples and labels: X={X.shape}, y={y.shape}")
-        return None, None
+        return None, None, None, None
 
     print(f"[debug][S{subject_id:02d}] Combined X shape: {X.shape}, y shape: {y.shape}")
 
@@ -204,7 +240,10 @@ def load_subject_data(subject_id):
 
     X = X[:, :, :N_TIME_POINTS]
 
-    return X, y
+    X_test = np.concatenate(xs_test, axis=0) if xs_test else None
+    y_test = np.concatenate(ys_test, axis=0) if ys_test else None
+
+    return X, y, X_test, y_test
 
 
 def create_crops(X, y, window_size, stride, is_train=True):
@@ -234,7 +273,99 @@ def create_crops(X, y, window_size, stride, is_train=True):
     return np.array(crops), np.array(labels), np.array(trial_idxs)
 
 
-def train_model(model_name, X_train, y_train, X_val, y_val, n_classes, n_chans, window_size):
+def _aggregate_probs_and_loss(model, loader, criterion):
+    model.eval()
+    probs_by_tid = {}
+    targets = {}
+    total_loss = 0.0
+    total_count = 0
+    with torch.no_grad():
+        for X_b, y_b, t_idx_b in loader:
+            X_b = X_b.to(DEVICE)
+            outputs = model(X_b)
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
+            if outputs.dim() > 2:
+                outputs = outputs.mean(dim=tuple(range(2, outputs.dim())))
+            loss = criterion(outputs, y_b.to(DEVICE))
+            total_loss += loss.item() * y_b.size(0)
+            total_count += y_b.size(0)
+            prob = torch.softmax(outputs, dim=1).cpu().numpy()
+            y_np = y_b.numpy()
+            t_np = t_idx_b.numpy()
+            for i in range(len(y_np)):
+                tid = int(t_np[i])
+                if tid not in probs_by_tid:
+                    probs_by_tid[tid] = []
+                    targets[tid] = int(y_np[i])
+                probs_by_tid[tid].append(prob[i])
+    preds = []
+    gts = []
+    for tid in sorted(probs_by_tid.keys()):
+        mean_prob = np.mean(probs_by_tid[tid], axis=0)
+        preds.append(int(np.argmax(mean_prob)))
+        gts.append(int(targets[tid]))
+    mean_loss = total_loss / max(total_count, 1)
+    return preds, gts, mean_loss
+
+
+def _save_checkpoint(path, model, optimizer, scheduler, epoch, best_acc, history, patience_counter):
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+            "best_acc": best_acc,
+            "best_model_state": getattr(model, "_best_state", None),
+            "history": history,
+            "patience_counter": patience_counter,
+        },
+        path,
+    )
+
+
+def _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler):
+    if not os.path.isdir(ckpt_dir):
+        return 1, 0.0, None, {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}, 0
+    candidates = [f for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
+    if not candidates:
+        return 1, 0.0, None, {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}, 0
+    latest = sorted(candidates)[-1]
+    ckpt_path = os.path.join(ckpt_dir, latest)
+    state = torch.load(ckpt_path, map_location=DEVICE)
+    model.load_state_dict(state.get("model_state", {}))
+    if optimizer is not None and state.get("optimizer_state"):
+        optimizer.load_state_dict(state["optimizer_state"])
+    if scheduler is not None and state.get("scheduler_state"):
+        scheduler_state = state["scheduler_state"]
+        if scheduler_state:
+            scheduler.load_state_dict(scheduler_state)
+    start_epoch = int(state.get("epoch", 0)) + 1
+    best_acc = float(state.get("best_acc", 0.0))
+    best_model_state = state.get("best_model_state")
+    history = state.get(
+        "history",
+        {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []},
+    )
+    patience_counter = int(state.get("patience_counter", 0))
+    print(f"[resume] Loaded checkpoint {ckpt_path}, resume from epoch {start_epoch}")
+    return start_epoch, best_acc, best_model_state, history, patience_counter
+
+
+def train_model(
+    model_name,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    X_test,
+    y_test,
+    n_classes,
+    n_chans,
+    window_size,
+    ckpt_dir,
+):
     # Initialize Model with model-specific builder
     builder = MODELS[model_name]
     model = builder(n_outputs=n_classes, n_chans=n_chans, n_times=window_size)
@@ -247,6 +378,10 @@ def train_model(model_name, X_train, y_train, X_val, y_val, n_classes, n_chans, 
 
     X_tr_crops, y_tr_crops, _ = create_crops(X_train, y_train, window_size, CROP_STRIDE, is_train=True)
     X_val_crops, y_val_crops, val_trial_idxs = create_crops(X_val, y_val, window_size, CROP_STRIDE, is_train=False)
+    if X_test is not None and y_test is not None:
+        X_te_crops, y_te_crops, te_trial_idxs = create_crops(X_test, y_test, window_size, CROP_STRIDE, is_train=False)
+    else:
+        X_te_crops = y_te_crops = te_trial_idxs = None
 
     train_loader = DataLoader(
         TensorDataset(torch.Tensor(X_tr_crops), torch.LongTensor(y_tr_crops)),
@@ -258,27 +393,37 @@ def train_model(model_name, X_train, y_train, X_val, y_val, n_classes, n_chans, 
         batch_size=BATCH_SIZE,
         shuffle=False,
     )
+    test_loader = None
+    if X_te_crops is not None:
+        test_loader = DataLoader(
+            TensorDataset(torch.Tensor(X_te_crops), torch.LongTensor(y_te_crops), torch.LongTensor(te_trial_idxs)),
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+        )
 
     # モデルごとの入力形状調整（全モデルで B,C,T を採用）
     def prepare_input(x):
         return x
 
-    # 事前に1バッチで形状を検証し、失敗するモデルはスキップ
-    try:
-        sample_X, _ = next(iter(train_loader))
-        print(f"[dry-run] {model_name} sample batch shape: {sample_X.shape}")
-        sample_X = prepare_input(sample_X).to(DEVICE)
-        _ = model(sample_X)
-    except Exception as e:
-        print(f"[warn] {model_name} dry-run forward failed (shape mismatch?): {e}; skipping this model.")
-        return 0.0
+    os.makedirs(ckpt_dir, exist_ok=True)
+    start_epoch, best_acc, best_model_state, history, patience_counter = _load_latest_checkpoint(ckpt_dir, model, optimizer, scheduler)
 
-    best_acc = 0
-    patience_counter = 0
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+    model._best_state = best_model_state
 
-    for epoch in range(MAX_EPOCHS):
+    # Ensure history lists exist
+    for k in ("train_loss", "train_acc", "val_loss", "val_acc"):
+        history.setdefault(k, [])
+
+    best_state = model.state_dict() if best_acc > 0 else None
+    best_epoch = start_epoch - 1
+
+    for epoch in range(start_epoch, MAX_EPOCHS + 1):
         model.train()
         train_loss = 0
+        correct_train = 0
+        total_train = 0
         for X_batch, y_batch in train_loader:
             X_batch = prepare_input(X_batch).to(DEVICE)
             y_batch = y_batch.to(DEVICE)
@@ -291,46 +436,39 @@ def train_model(model_name, X_train, y_train, X_val, y_val, n_classes, n_chans, 
             loss = criterion(outputs, y_batch)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
+            train_loss += loss.item() * y_batch.size(0)
+            pred = outputs.argmax(dim=1)
+            correct_train += (pred == y_batch).sum().item()
+            total_train += y_batch.size(0)
 
         scheduler.step()
 
-        model.eval()
-        val_probs = {}
-        val_targets = {}
+        train_loss_mean = train_loss / max(total_train, 1)
+        train_acc = correct_train / max(total_train, 1)
 
-        with torch.no_grad():
-            for X_b, y_b, t_idx_b in val_loader:
-                X_b = prepare_input(X_b).to(DEVICE)
-                outputs = model(X_b)
-                if isinstance(outputs, tuple):
-                    outputs = outputs[0]
-                if outputs.dim() > 2:
-                    outputs = outputs.mean(dim=tuple(range(2, outputs.dim())))
-                probs = torch.softmax(outputs, dim=1).cpu().numpy()
-                y_b = y_b.numpy()
-                t_idx_b = t_idx_b.numpy()
+        # Val aggregation
+        val_preds, val_targets, val_loss = _aggregate_probs_and_loss(model, val_loader, criterion)
+        val_acc = float(np.mean(np.equal(val_preds, val_targets))) if val_targets else 0.0
 
-                for i in range(len(y_b)):
-                    tid = t_idx_b[i]
-                    if tid not in val_probs:
-                        val_probs[tid] = []
-                        val_targets[tid] = y_b[i]
-                    val_probs[tid].append(probs[i])
+        history["train_loss"].append(train_loss_mean)
+        history["train_acc"].append(train_acc)
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
 
-        correct = 0
-        total = len(val_probs)
-        for tid in val_probs:
-            mean_prob = np.mean(val_probs[tid], axis=0)
-            pred = np.argmax(mean_prob)
-            if pred == val_targets[tid]:
-                correct += 1
+        print(
+            f"Epoch {epoch}/{MAX_EPOCHS} | train_loss={train_loss_mean:.4f} train_acc={train_acc:.4f} "
+            f"val_loss={val_loss:.4f} val_acc={val_acc:.4f}"
+        )
 
-        val_acc = correct / total
-        print(f"Epoch {epoch+1}/{MAX_EPOCHS} | Loss: {train_loss/len(train_loader):.4f} | Val Acc: {val_acc:.4f}")
+        # Save checkpoint every epoch
+        ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch:04d}.pt")
+        _save_checkpoint(ckpt_path, model, optimizer, scheduler, epoch, best_acc, history, patience_counter)
 
         if val_acc > best_acc:
             best_acc = val_acc
+            best_state = model.state_dict()
+            best_epoch = epoch
+            model._best_state = best_state
             patience_counter = 0
         else:
             patience_counter += 1
@@ -338,7 +476,14 @@ def train_model(model_name, X_train, y_train, X_val, y_val, n_classes, n_chans, 
                 print("Early stopping")
                 break
 
-    return best_acc
+    # Load best state for final evaluation
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    test_preds = test_targets = None
+    if test_loader is not None:
+        test_preds, test_targets, _ = _aggregate_probs_and_loss(model, test_loader, criterion)
+    return best_acc, history, (test_preds, test_targets), (val_preds, val_targets), best_epoch
 
 
 def main():
@@ -347,7 +492,7 @@ def main():
 
     for subject_id in SUBJECT_IDS:
         print(f"--- Processing Subject {subject_id} ---")
-        X, y = load_subject_data(subject_id)
+        X, y, X_test, y_test = load_subject_data(subject_id)
         if X is None:
             continue
 
@@ -364,20 +509,101 @@ def main():
 
             for model_name in MODELS:
                 print(f"Training {model_name}...")
+                model_run_dir = os.path.join(results_dir, f"S{subject_id:02d}", f"fold{fold+1:02d}", model_name)
+                test_acc_val = None
+
                 try:
-                    acc = train_model(
+                    acc, history, test_preds_targets, val_preds_targets, best_epoch = train_model(
                         model_name,
                         X_train,
                         y_train,
                         X_val,
                         y_val,
+                        X_test,
+                        y_test,
                         n_classes,
                         n_chans,
                         window_size=CROP_WINDOW,
+                        ckpt_dir=os.path.join(model_run_dir, "checkpoints"),
                     )
                 except Exception as e:
                     print(f"[warn] {model_name} crashed: {e}; skipping and continuing.")
                     acc = 0.0
+                    history = {}
+                    test_preds_targets = (None, None)
+                    val_preds_targets = (None, None)
+                    best_epoch = None
+                else:
+                    preds_te, targets_te = test_preds_targets
+                    if preds_te is not None and targets_te is not None and len(preds_te) > 0:
+                        test_acc_val = float(np.mean(np.equal(preds_te, targets_te)))
+
+                # Save history CSV/JSON
+                os.makedirs(model_run_dir, exist_ok=True)
+                epochs = list(range(1, len(history.get("train_loss", [])) + 1))
+                hist_df = pd.DataFrame({
+                    "epoch": epochs,
+                    "train_loss": history.get("train_loss", []),
+                    "train_acc": history.get("train_acc", []),
+                    "val_loss": history.get("val_loss", []),
+                    "val_acc": history.get("val_acc", []),
+                    "subject": f"S{subject_id:02d}",
+                    "model": model_name,
+                    "fold": fold + 1,
+                    "best_epoch": best_epoch,
+                })
+                hist_json_path = os.path.join(model_run_dir, "history.json")
+                hist_csv_path = os.path.join(model_run_dir, "history.csv")
+                hist_df.to_json(hist_json_path, orient="records", indent=2)
+                hist_df.to_csv(hist_csv_path, index=False)
+
+                # Plot learning curves
+                try:
+                    fig, ax = plt.subplots(figsize=(8, 5))
+                    ax.plot(hist_df["epoch"], hist_df["train_loss"], label="train_loss")
+                    ax.plot(hist_df["epoch"], hist_df["val_loss"], label="val_loss")
+                    ax.set_xlabel("Epoch")
+                    ax.set_ylabel("Loss")
+                    ax.legend()
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(model_run_dir, "learning_curves_loss.png"), dpi=120)
+                    plt.close(fig)
+
+                    fig, ax = plt.subplots(figsize=(8, 5))
+                    ax.plot(hist_df["epoch"], hist_df["train_acc"], label="train_acc")
+                    ax.plot(hist_df["epoch"], hist_df["val_acc"], label="val_acc")
+                    ax.set_xlabel("Epoch")
+                    ax.set_ylabel("Accuracy")
+                    ax.legend()
+                    fig.tight_layout()
+                    fig.savefig(os.path.join(model_run_dir, "learning_curves_acc.png"), dpi=120)
+                    plt.close(fig)
+                except Exception as plot_err:
+                    print(f"[warn] Failed to plot curves: {plot_err}")
+
+                # Confusion matrix (test preferred, else val) using best model
+                try:
+                    preds, targets = test_preds_targets
+                    if preds is None or targets is None or len(preds) == 0:
+                        preds, targets = val_preds_targets
+                    if preds is not None and targets is not None and len(preds) > 0:
+                        cm = confusion_matrix(targets, preds, labels=list(range(n_classes)))
+                        fig, ax = plt.subplots(figsize=(6, 5))
+                        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", cbar=True, ax=ax,
+                                    xticklabels=list(range(n_classes)), yticklabels=list(range(n_classes)))
+                        ax.set_xlabel("Predicted")
+                        ax.set_ylabel("True")
+                        ax.set_title(f"Confusion Matrix {model_name} fold {fold+1}")
+                        fig.tight_layout()
+                        fig.savefig(os.path.join(model_run_dir, "confusion_matrix.png"), dpi=120)
+                        plt.close(fig)
+                except Exception as cm_err:
+                    print(f"[warn] Failed to save confusion matrix: {cm_err}")
+
+                if test_acc_val is not None:
+                    print(f"[S{subject_id:02d}][fold {fold+1}][{model_name}] test_acc={test_acc_val:.4f}")
+                else:
+                    print(f"[S{subject_id:02d}][fold {fold+1}][{model_name}] test_acc=NA (no test split)")
 
                 results.append({
                     "Subject": subject_id,

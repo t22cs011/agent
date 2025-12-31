@@ -1,0 +1,97 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.conda/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.coverage
+coverage.xml
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Notebook / temporary
+tmp/
+nvidia-bug/
+
+# Project artifacts and outputs
+runs/
+logs/
+checkpoints/
+*.ckpt
+
+# Generated files
+generated_script.py
+
+# Misc
+*.swp
+*.tmp
+
+# Environment / secrets
+.env
+secrets/
+*.pem
+*.key
+.ssh/
+
+# Model / data artifacts
+*.pkl
+*.pickle
+*.h5
+*.pt
+*.pth
+*.onnx
+models/
+data/
+datasets/
+
+# Caches / local
+.cache/
+cache/
+
+# Archives
+*.tar.gz
+*.tgz
+*.zip
+
+# Docker override
+docker-compose.override.yml
+

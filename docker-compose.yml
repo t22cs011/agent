@@ -17,3 +17,4 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=http://host.docker.internal:11434
+    user: "10151:200"
