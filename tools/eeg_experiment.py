@@ -20,9 +20,8 @@ except Exception as exc:
     EXP_CONFIG_IMPORT_ERROR = str(exc)
 
 TARGET_PYTHON = "/data/kawamura/miniforge3/envs/bci2020/bin/python"
-DEFAULT_SCRIPT_PATH = (
-    Path("bci_code/train_cv.py")
-)
+DEFAULT_SCRIPT_PATH = Path("bci_code/train_cv_full.py")
+DEFAULT_DATA_ROOT = os.environ.get("BCI_DATA_ROOT", "/mnt/bci_source/data/preprocessed_mixed_256hz_v2")
 WORKSPACE_DIR = Path(__file__).resolve().parents[1]
 SUPPORTED_KEYS = {
     "seed",
@@ -68,7 +67,7 @@ def _default_config() -> Dict[str, Any]:
             "epochs": 200,
             "patience": 20,
             "lr": 1e-3,
-            "cache_root": "/home/kawamura/bci_project/braindecodetest/data/preprocessed_mixed_256hz_v2",
+            "cache_root": DEFAULT_DATA_ROOT,
             "subject_ids": list(range(1, 16)),
             "aug_prob": 0.5,
             "snr_segments": 4,

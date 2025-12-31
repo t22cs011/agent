@@ -17,4 +17,22 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - OLLAMA_HOST=http://host.docker.internal:11434
+      - MLFLOW_TRACKING_URI=file:///tmp/mlruns
+      - MPLCONFIGDIR=/tmp/matplotlib
     user: "10151:200"
+
+  mlflow_server:
+    image: ghcr.io/mlflow/mlflow
+    ports:
+      - "5000:5000"
+    command: >
+      mlflow server --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlruns
+      --host 0.0.0.0 --port 5000
+    volumes:
+      - mlflow_data:/mlflow
+      - mlruns:/mlruns
+
+volumes:
+  mlflow_data:
+  mlruns:

@@ -1,212 +1,45 @@
-承知いたしました。ご指定のディレクトリ構造の明確化を反映した `README.md` の更新版と、その新しい仕様に基づいてCopilotに作業を指示するためのプロンプトを作成しました。
-
-### 1. 更新版 README.md
-
-ご提示いただいた内容を統合し、構造を整理しました。「2. System Architecture」の中にハードウェア構成などの説明を残しつつ、「2.1. Directory Structure」を追加しています。
-
-```markdown
 # EEG解析自律エージェント向けツールガイド
 
 ## 1. Project Overview (研究背景)
-
 - **目的:** EEG Conformer を用いた言語デコーディング（EEG-based Language Decoding）のために、仮説立案〜実験実行〜結果分析を自律的に回せる研究サイクルを構築する。
 - **目標:** 2026年修士課程進学に向け、試行錯誤を自律的に行う「階層型マルチエージェントシステム」を整備し、毎週のトレーニング実験と評価を継続的に完遂できるようにする。
 - **ユーザー:** Shungook（Future BCI Product Manager）として、エージェントを「意思決定と監督」に集中させながら、重めの学習処理は安全に Worker に委譲する。
 
 ## 2. System Architecture (システム構成)
+本プロジェクトは Controller（意思決定）と Worker（実験実行）を明確に分離した構成です。
 
-本プロジェクトは Controller（意思決定）と Worker（実験実行）を明確に分離した二層構造です。
-
-- **Hardware:** Server `Cygnus`（Ubuntu、Titan RTX 24GB VRAM）
+- **Hardware:** Server `Sirius` (Ubuntu, RTX 3090 24GB)
+- **Infrastructure:** Docker Compose (Worker + MLflow)
 - **Controller (Agent):**
-  - **Stack:** LangGraph + Ollama（`deepseek-r1:14b`）
-  - **Environment:** `agent_env`（軽量な意思決定ロジック）
-  - **Role:** 実験計画の立案、コード生成、ステータス報告
+  - **Stack:** LangGraph + Ollama (`deepseek-r1:14b`)
+  - **Role:** 実験計画、コード生成、ステータス管理 (`STATUS.md`)
 - **Worker (Experiment):**
-  - **Stack:** Braindecode / PyTorch
-  - **Environment:** `bci2020`（既存研究環境）
-  - **Role:** [`tools.eeg_experiment.run_eeg_experiment`](tools/eeg_experiment.py) を介して `train_cv.py` を起動し、学習・評価を実行
-  - **Interface:** JSON 設定ファイルを受け取り、ログから抽出された Metrics（例: Accuracy）を返す
-
-Controller は `tools.eeg_experiment` とのやり取りを通じて、実験の dry-run → 実行 → メトリクス確認というサイクルを実装します。Worker 側はホワイトリスト化されたパラメータと隔離された Python 環境（`TARGET_PYTHON`）でのみ動作します。
+  - **Container:** `bci` (PyTorch 2.x, Braindecode, CUDA 12.1)
+  - **Role:** [`tools.eeg_experiment`](tools/eeg_experiment.py) 経由で `docker exec` され、学習を実行。
+- **Logger (Experiment Tracking):**
+  - **Service:** `mlflow_server` (Local Host)
+  - **Role:** 実験パラメータ、メトリクス (Accuracy, Loss)、モデルの記録・可視化。
 
 ### 2.1. Directory Structure & Data Locations (重要)
-本プロジェクトは、AgentのコードとBCI研究の本番データ/コードが別ディレクトリに分かれています。Docker環境から本番データにアクセスするには、適切なボリュームマウントが必要です。
+Agentコードと研究用データセットは別ディレクトリにあり、Dockerのボリュームマウントで接続します。
 
 - **Agent Root (`/home/kawamura/agent`)**
-  - **内容:** Agentのソースコード、`docker-compose.yml`、`STATUS.md`
-  - **Dockerマウント:** コンテナ内の `/app` にマウントされています。
-  - **役割:** 実験の制御、ログの収集。
-
+  - **Docker Mount:** `/app`
+  - **内容:** Agentソース, `docker-compose.yml`, `STATUS.md`
 - **BCI Project Root (`/home/kawamura/bci_project/braindecodetest`)**
-  - **内容:** BCI 2020用の本番ソースコード、および大規模データセット（`data/`）
-  - **Dockerマウント:** **デフォルトではマウントされていません。**
-  - **役割:** 学習データの提供。本番実験を行う際は、このディレクトリをコンテナ（例: `/mnt/bci_source`）にマウントし、そこからデータを読み込む必要があります。
+  - **Docker Mount:** `/mnt/bci_source` (Read-Only)
+  - **内容:** 本番用ソースコード (`bci_code/`), データセット (`data/`)
+  - **注意:** 学習スクリプトは `/mnt/bci_source/data/...` からデータを読み込む必要があります。
 
-## Keeping GPU services alive via tmux
-GPU が使えない原因は [`main.py`](main.py) の `preflight_checks` で `nvidia-smi` が見つからない・GPU が検出されない事にあります。Cygnus 上の GPU ドライバや Ollama サービスが落ちているとこのチェックが失敗するため、以下のように `tmux` で常駐させておきます。
+## 3. Workflow & Usage
 
-1. `tmux new -s cygnus-gpu` で新しいセッションを作り、`sudo systemctl start nvidia-persistenced`（または `sudo modprobe nvidia` が必要ならその後）→ `nvidia-smi` を実行して GPU を確認。ログを閉じずに `Ctrl-b d` でデタッチしておきます。
-2. Ollama サービスも `tmux new -s ollama` で立ち上げ、`OLLAMA_MODELS=/data/kawamura/.ollama ollama serve` を実行し続けることで `main.py` の `service_available` チェックを常に満たします。
-3. `nvidia-smi` の出力にデバイスが表示されるまで 1→2 を繰り返し、`main.py` の `use_gpu` が `True` になるのを確認してください（`preflight_checks` のログに `Greaph Ready` などが出ます）。
+### 3.1. エージェントによる実験実行
+Agent は `tools/eeg_experiment.py` を使用して Docker コンテナ内の学習スクリプトを呼び出します。
 
-このように `tmux` で GPU ドライバ系サービスと Ollama サーバを常駐させ、定期的に `nvidia-smi` を叩いて GPU 状態を確認することで、今後 GPU が使えない状態を防げます。
-
-## `run_eeg_experiment` の使い方
 ```python
-from typing import Any, Dict, Optional
-from pathlib import Path
-
-def run_eeg_experiment(
-    overrides: Dict[str, Any],
-    *,
-    run_label: Optional[str] = None,
-    dry_run: bool = False,
-    python_executable: Optional[str] = None,
-    script_path: Path = DEFAULT_SCRIPT_PATH,
-    timeout: Optional[float] = None,
-    workspace_dir: Optional[Path] = None,
-) -> Dict[str, Any]:
-    ...
-
-```
-
-* `overrides`: `SUPPORTED_KEYS`（seed, n_splits, batch_size, epochs, patience, lr, cache_root, subject_ids、AUG_PROB など補助パラメータ）以外を受け付けません。ホワイトリスト違反は `ValueError` を返します。
-* `run_label`: `runs/eeg/<timestamp>_<label>` 名の末尾文字列。
-* `dry_run`: `True` のときは config を書いて `planned_cmd` を返すのみで実行しません。
-* `python_executable`: 特定の Python バイナリを指定できます（デフォルトは `TARGET_PYTHON`）。
-
-### Dry-run の例
-
-```bash
-python - <<'PY'
-from tools import eeg_experiment
-
-plan = eeg_experiment.run_eeg_experiment(
-    {
-        "epochs": 1,
-        "batch_size": 64,
-        "subject_ids": [1],
-    },
-    run_label="smoke",
-    dry_run=True,
+# Agent内部での呼び出しイメージ
+run_eeg_experiment(
+    overrides={"epochs": 10, "batch_size": 32},
+    dry_run=False
 )
-print(plan["planned_cmd"])
-print(plan["config_path"])
-PY
-
-```
-
-この段階で config JSON、`run_dir`、`planned_cmd` を確認し、`dry_run=False` でのみ `train_cv.py` を起動してください。
-
-### 戻り値の構造
-
-* `run_dir`: 実行アーティファクトの保存先（例: `runs/eeg/20251229T154318_smoke_test`）
-* `config_path`: 書き出された JSON
-* `planned_cmd`: 実行されるコマンド
-* `log_path`: `train.log`（stdout/stderr を蓄積）
-* `stdout_tail`, `stderr_tail`: 末尾ログ
-* `exit_code`: 実行コード（dry_run は `None`）
-* `metrics`: 正規表現で抽出した `overall_mean_acc` など
-* `error`: 実行中の例外発生時に文字列で記録
-
-この辞書を公式ステータスとして扱い、次のアクションや報告ではそのまま引用してください。
-
-## セキュリティ／堅牢性
-
-* `SUPPORTED_KEYS` 以外の `overrides` キーは拒否されるため、LLM の任意コマンド挿入を防ぎます。
-* `train_cv.py` 実行は常に `/data/kawamura/miniforge3/envs/bci2020/bin/python`（`TARGET_PYTHON`）から行い、信頼済み環境で制御します。
-
-```
-
----
-
-### 2. Copilot向けプロンプト
-
-## Working in a New VS Code Window
-
-If you want to work in a fresh VS Code window (recommended when attaching to containers), follow these steps:
-
-- Start or confirm the Docker container is running (from the project root):
-
-```bash
-docker-compose up -d
-docker ps
-```
-
-- Open a new VS Code window: `File -> New Window` (or `Ctrl+Shift+N`).
-- In the new window open the Command Palette (`Ctrl+Shift+P`) and choose `Remote-Containers: Attach to Running Container...` (Dev Containers).
-- Select the container for this project (likely named `agent_bci_1` or `bci` depending on how you started it).
-
-- Inside the attached container:
-  - Code is mounted at `/app` (your project files).
-  - Dataset (if you mounted it) is available at `/mnt/bci_source` (read-only as configured).
-
-Quick terminal commands (run on host or inside container as appropriate):
-
-```bash
-# enter the running container shell
-docker exec -it bci bash
-
-# run training (example)
-python3 bci_code/train_cv_full.py
-```
-
-Notes:
-- Use `Attach to Running Container...` if the container is already running. Use `Reopen in Container` or `New Dev Container...` if you prefer to rebuild or use a `.devcontainer` config.
-- The container name shown by VS Code may differ; use `docker ps` to confirm the exact name.
-
-## Recent changes (summary)
-
-- Added cropped decoding and cropping params in training scripts (window=464, stride=6 → 9 crops per trial).
-- Implemented per-epoch checkpointing and resume support (checkpoints saved under `runs/.../checkpoints/`).
-- Persisted early-stop `patience_counter` in checkpoints to resume training without losing state.
-- Computed and saved train/val/test metrics per epoch; added learning-curve and confusion-matrix PNG outputs.
-- Set `RESULTS_ROOT` to `/home/kawamura/agent/runs` so results persist on the host.
-- Added hardware mitigations: reduced `batch_size`, set BLAS/OpenMP thread limits, enabled `faulthandler` logging.
-
-## Known issues
-
-- Intermittent native/CUDA errors have appeared during long training runs (examples: `cuDNN_STATUS_EXECUTION_FAILED`, `invalid resource handle`, `free(): invalid pointer`). These indicate GPU driver or hardware instability; mitigations have been added but hardware diagnostics (driver reinstallation, `nvidia-smi` checks, or running `CUDA_LAUNCH_BLOCKING=1` for debugging) may be necessary.
-
----
-
-READMEの更新内容を踏まえ、Copilotに「ボリュームマウントの設定」と「本番データへのパス切り替え」を指示するプロンプトです。
-
-```markdown
-# タスク: 本番データ環境の統合と検証
-
-README.md が更新され、AgentディレクトリとBCIプロジェクトディレクトリの関係性（Section 2.1）が明確化されました。
-この仕様に基づき、ダミーデータ運用から本番データ運用へ移行するため、以下の手順を実行してください。
-
-## 目的
-ホスト側のBCIプロジェクトルート（`/home/kawamura/bci_project/braindecodetest`）をコンテナにマウントし、`train_cv.py` から実データを参照可能にする。
-
-## 実行手順
-
-### Step 1: docker-compose.yml の修正
-`docker-compose.yml` を編集し、以下のボリュームマウントを追加してください。
-- **Host Path:** `/home/kawamura/bci_project/braindecodetest`
-- **Container Path:** `/mnt/bci_source`
-- **Options:** `read_only: true` (または `:ro`)
-
-編集後、`docker compose up -d` を実行してコンテナに変更を適用してください。
-
-### Step 2: 学習スクリプトの修正 (`bci_code/train_cv.py`)
-`bci_code/train_cv.py` を修正し、マウントされたパスからデータを読み込むロジックを実装してください。
-
-1. **データルートの優先順位:**
-   - 優先: `/mnt/bci_source/data/preprocessed_mixed_256hz_v2` (READMEのBCI Project Rootに基づく)
-   - フォールバック: 現在のSynthetic Data生成ロジック（データが見つからない場合のみ警告を出して使用）
-2. **ログ出力:**
-   - どちらのデータソースを使用しているか、INFOレベルでログに出力してください（例: `INFO | Loading Real Data from /mnt/bci_source/...`）。
-
-### Step 3: 動作検証
-`tools.eeg_experiment` を使用して動作確認を行ってください。
-
-1. **Dry Run:** `dry_run=True` で実行し、エラーが出ないことを確認。
-2. **Smoke Test:** `dry_run=False`, `epochs=1` で実行し、ログに「Real Data」の読み込み成功メッセージが出ることを確認してください。
-
-**注意:** 作業中は `README.md` の "2.1. Directory Structure & Data Locations" を常に参照してください。
-
-```
+# -> 内部で `docker exec bci python bci_code/train_cv.py ...` が実行される
