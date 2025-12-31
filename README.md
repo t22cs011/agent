@@ -123,6 +123,54 @@ PY
 
 ### 2. Copilot向けプロンプト
 
+## Working in a New VS Code Window
+
+If you want to work in a fresh VS Code window (recommended when attaching to containers), follow these steps:
+
+- Start or confirm the Docker container is running (from the project root):
+
+```bash
+docker-compose up -d
+docker ps
+```
+
+- Open a new VS Code window: `File -> New Window` (or `Ctrl+Shift+N`).
+- In the new window open the Command Palette (`Ctrl+Shift+P`) and choose `Remote-Containers: Attach to Running Container...` (Dev Containers).
+- Select the container for this project (likely named `agent_bci_1` or `bci` depending on how you started it).
+
+- Inside the attached container:
+  - Code is mounted at `/app` (your project files).
+  - Dataset (if you mounted it) is available at `/mnt/bci_source` (read-only as configured).
+
+Quick terminal commands (run on host or inside container as appropriate):
+
+```bash
+# enter the running container shell
+docker exec -it bci bash
+
+# run training (example)
+python3 bci_code/train_cv_full.py
+```
+
+Notes:
+- Use `Attach to Running Container...` if the container is already running. Use `Reopen in Container` or `New Dev Container...` if you prefer to rebuild or use a `.devcontainer` config.
+- The container name shown by VS Code may differ; use `docker ps` to confirm the exact name.
+
+## Recent changes (summary)
+
+- Added cropped decoding and cropping params in training scripts (window=464, stride=6 → 9 crops per trial).
+- Implemented per-epoch checkpointing and resume support (checkpoints saved under `runs/.../checkpoints/`).
+- Persisted early-stop `patience_counter` in checkpoints to resume training without losing state.
+- Computed and saved train/val/test metrics per epoch; added learning-curve and confusion-matrix PNG outputs.
+- Set `RESULTS_ROOT` to `/home/kawamura/agent/runs` so results persist on the host.
+- Added hardware mitigations: reduced `batch_size`, set BLAS/OpenMP thread limits, enabled `faulthandler` logging.
+
+## Known issues
+
+- Intermittent native/CUDA errors have appeared during long training runs (examples: `cuDNN_STATUS_EXECUTION_FAILED`, `invalid resource handle`, `free(): invalid pointer`). These indicate GPU driver or hardware instability; mitigations have been added but hardware diagnostics (driver reinstallation, `nvidia-smi` checks, or running `CUDA_LAUNCH_BLOCKING=1` for debugging) may be necessary.
+
+---
+
 READMEの更新内容を踏まえ、Copilotに「ボリュームマウントの設定」と「本番データへのパス切り替え」を指示するプロンプトです。
 
 ```markdown
