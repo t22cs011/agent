@@ -72,3 +72,86 @@ run_eeg_experiment(
 5. `docker-compose.yml` のドキュメント化: 現在の `network_mode: host` 選択理由と、元に戻す手順を README に追記する。
 
 必要であれば上記タスクを順に実行して差し上げます。変更履歴や追加の補足が必要なら教えてください。
+
+## Quick Start — 確実に起動するための手順
+
+以下はこのリポジトリをホスト上で確実に起動するための短い手順です。環境に応じた調整（ユーザ名、パス、コンテナ名など）をしてください。
+
+1. ホストで Ollama を起動し、目的のモデル（例: `deepseek-r1:14b`）を pull しておく:
+
+```bash
+# Ollama サービスが systemd 管理されている場合
+sudo systemctl start ollama
+ollama pull deepseek-r1:14b
+ollama list
+```
+
+2. （推奨）依存を含むイメージをビルドする（ビルドマシンに十分なメモリが必要）:
+
+```bash
+# 重いサイエンス依存や LLM クライアントをイメージへ焼き込みたい場合
+docker build \
+  --build-arg INSTALL_SCIENCE_PACKAGES=true \
+  --build-arg INSTALL_LLM_PACKAGES=true \
+  -t agent-bci-llm:latest .
+```
+
+3. 既存イメージを使う場合は `docker compose up` で `bci` サービスを起動する（`network_mode: host` を使用している場合、ホストの Ollama に直接接続できます）:
+
+```bash
+docker compose up -d --force-recreate bci
+docker compose ps
+```
+
+4. コンテナ内で `main.py` を実行してエージェントが `System Ready!` になることを確認する:
+
+```bash
+container=$(docker compose ps -q bci)
+docker exec -it "$container" /bin/bash -c "python3 /app/main.py"
+# プロンプトが表示され、Model: deepseek-r1:14b が表示されれば OK
+```
+
+5. もしコンテナ側で言語モデルクライアント等が欠けている場合（`No module named 'langgraph'` 等）、コンテナ内で一時的にインストールし、動作確認後イメージをコミットすると再現性が高まります:
+
+```bash
+docker exec -it "$container" /bin/bash
+pip install langgraph langchain-ollama langchain-core
+# 動作確認後、コンテナをコミット
+docker commit "$container" agent-bci-llm:latest
+```
+
+## トラブルシュート（よくある問題と対処）
+
+- Ollama の `500` エラー / ランナープロセス終了:
+  - まずホスト側のログを確認してください:
+    ```bash
+    sudo journalctl -u ollama -n 500 --no-pager
+    sudo tail -n 500 ~/.ollama/serve.log || true
+    sudo dmesg | grep -i -E 'oom|killed' || true
+    ```
+  - GPU メモリ不足なら、動作中の他プロセスを停止するかモデルの quantize レベルを見直してください。
+
+- `No module named 'langgraph'` など Python モジュールエラー:
+  - ホストで `TARGET_PYTHON` に指定した環境（例: `bci2020`）を作成し依存をインストールするか、コンテナ内で `pip install` してイメージをコミットしてください。
+
+- ホストの Ollama にコンテナから接続できない:
+  - 一時的に `network_mode: host` を使うか、`extra_hosts` / ポートフォワーディングを設定してください（`127.0.0.1` バインドの制限を回避するため）。
+
+## 確認コマンド（起動後のチェックリスト）
+
+```bash
+# Ollama が応答するか
+curl -sS http://127.0.0.1:11434/health
+ollama list
+
+# コンテナ側で agent が起動しているか
+docker compose ps
+docker logs $(docker compose ps -q bci) --tail 200
+
+# エージェントから LLM へ問い合わせテスト
+docker exec -it $(docker compose ps -q bci) /bin/bash -c "python3 /app/main.py" # -> USER> で質問
+```
+
+---
+
+上の手順を `README` に追記しました。必要なら自動化用の起動スクリプト（`scripts/up.sh` など）を作成してお渡しします。
