@@ -1,7 +1,6 @@
 name: CI - Build and Push agent image
 
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       image_name:
