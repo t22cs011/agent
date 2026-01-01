@@ -41,7 +41,7 @@ except Exception as exc:
 # ==========================================
 
 # 1. 実行部隊 (bci2020) のPythonパス
-TARGET_PYTHON = "/data/kawamura/miniforge3/envs/bci2020/bin/python"
+TARGET_PYTHON = os.environ.get('TARGET_PYTHON', '/data/kawamura/miniforge3/envs/bci2020/bin/python')
 
 # 1.1 目標精度 (環境変数で上書き可)
 TARGET_ACC = float(os.environ.get('TARGET_ACC', '0.8'))
@@ -168,6 +168,27 @@ def preflight_checks():
                 pass
     if service_available and out_svc and LLM_MODEL in out_svc:
         model_present = True
+
+    # If the CLI isn't available inside the container but the Ollama HTTP service is reachable,
+    # try querying the HTTP API for available models (more robust inside minimal containers).
+    if service_available and not model_present:
+        try:
+            import urllib.request, urllib.error
+            host = os.environ.get('OLLAMA_HOST', '127.0.0.1:11434')
+            if host.startswith('http://') or host.startswith('https://'):
+                url_base = host
+            else:
+                url_base = f"http://{host}"
+            tags_url = f"{url_base}/api/tags"
+            req = urllib.request.Request(tags_url, headers={"User-Agent": "agent-check/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read().decode('utf-8', errors='ignore')
+                if LLM_MODEL in body or LLM_MODEL.split(':')[0] in body:
+                    model_present = True
+                    details['checks']['ollama_http_tags'] = body[:2000]
+        except Exception:
+            # ignore HTTP probe failures; fall back to filesystem checks
+            pass
 
     # 2) OLLAMA_MODELS 環境変数または候補パスで確認
     candidates = []
@@ -452,6 +473,7 @@ def executor_node(state: AgentState):
         
         output = result.stdout + result.stderr
         # ログから精度を抽出する (柔軟にマッチ)
+        # NOTE: LLM 側の出力は `Accuracy: 0.85` などこの正規表現で拾える形式を必ず守らせること。フォーマットが崩れると精度を記録できない。
         acc_match = re.search(r"(?:Accuracy|overall_mean_acc|overall mean acc)[\s:=]*([0-9]*\.?[0-9]+)", output, re.IGNORECASE)
         accuracy = None
         if acc_match:
