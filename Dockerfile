@@ -26,9 +26,14 @@ RUN if [ "$INSTALL_SCIENCE_PACKAGES" = "true" ] ; then \
         echo "Skipping heavy science packages (set INSTALL_SCIENCE_PACKAGES=true to enable)" ; \
     fi
 
-# --- 2. EEG & DL Domain ---
-RUN python -m pip install --no-cache-dir \
-    mne==1.6.1 braindecode==0.8.1 moabb==1.0.0 torchinfo==1.8.0
+# --- 2. EEG & DL Domain (optional, may segfault on low-memory builders) ---
+ARG INSTALL_EEG_PACKAGES=false
+RUN if [ "$INSTALL_EEG_PACKAGES" = "true" ] ; then \
+        python -m pip install --no-cache-dir \
+            mne==1.6.1 braindecode==0.8.1 moabb==1.0.0 torchinfo==1.8.0 ; \
+    else \
+        echo "Skipping EEG & DL heavy pip packages (set INSTALL_EEG_PACKAGES=true to enable)" ; \
+    fi
 
 # --- 3. Utilities ---
 RUN python -m pip install --no-cache-dir \

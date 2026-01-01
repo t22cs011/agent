@@ -33,6 +33,30 @@ Agentコードと研究用データセットは別ディレクトリにあり、
 
 ## 3. Workflow & Usage
 
+## コンテナ運用の最短手順
+
+- **開発者向け（sudo なし）**
+  - 起動: `docker compose up -d --build`
+  - 停止: `docker compose down`
+  - ログ閲覧: `docker compose logs -f bci`
+- **運用担当向け（sudo/systemd 利用）**
+  - リポジトリ同梱の `systemd/agent-bci.service` を `/etc/systemd/system/` に配置し、`sudo systemctl daemon-reload` を実行
+  - 起動・自動起動有効化: `sudo systemctl enable --now agent-bci`
+  - ログ閲覧: `sudo journalctl -u agent-bci -f`
+
+## CI/CD & Heavy Image Build
+
+- `mamba` と重いサイエンス系パッケージはビルドメモリを多く消費するため、可能なら Self-Hosted Runner で `.github/workflows/ci-build-image.yml` を実行
+- Self-Hosted が無い場合でも、ビルドマシンは 16GB 以上の RAM を推奨
+- 本番用イメージでは `INSTALL_SCIENCE_PACKAGES=true` を build-arg で指定し、必要な依存をイメージに焼き込む
+
+## Debugging Handbook
+
+- 状態確認: `docker compose ps`
+- ログ確認: `docker compose logs -f bci`（systemd 運用時は `journalctl` でも可）
+- コンテナへ入る: `docker exec -it <container_id> /bin/bash`
+- Python 環境確認（コンテナ内）: `python --version` と `pip list | grep mne` で主要依存が揃っているか確認
+
 ### 3.1. エージェントによる実験実行
 Agent は `tools/eeg_experiment.py` を使用して Docker コンテナ内の学習スクリプトを呼び出します。
 
@@ -152,7 +176,107 @@ docker logs $(docker compose ps -q bci) --tail 200
 docker exec -it $(docker compose ps -q bci) /bin/bash -c "python3 /app/main.py" # -> USER> で質問
 ```
 
----
+## 権限と systemd の設置について（重要）
+
+### 概要
+`systemd` ユニット (`systemd/agent-bci.service`) を `/etc/systemd/system` に配置して有効化するには管理者権限が必要です。リポジトリ内のユニットファイルは `/home/kawamura/agent/systemd/agent-bci.service` にあります。
+
+### 対処方法（選択肢）
+
+- 1) 管理者が直接実行する（推奨）
+
+  管理者は次を実行してください:
+  ```bash
+  sudo cp /home/kawamura/agent/systemd/agent-bci.service /etc/systemd/system/agent-bci.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now agent-bci.service
+  sudo systemctl status agent-bci.service --no-pager
+  ```
+
+- 2) 管理者に依頼する（管理者に上のコマンド列を渡す）
+
+- 3) `testuser` に sudo 権限があり、そのアカウントを使える場合
+
+  ```bash
+  su - testuser
+  sudo cp /home/kawamura/agent/systemd/agent-bci.service /etc/systemd/system/agent-bci.service
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now agent-bci.service
+  ```
+
+- 4) `kawamura` を sudoers に追加してもらう（管理者が実行）
+
+  ```bash
+  sudo usermod -aG sudo kawamura
+  # その後、kawamura でログインし直して上の管理者手順を実行
+  ```
+
+- 5) root/sudo が使えない場合の代替（手動で常時起動させる）
+
+  systemd を使わずに Docker Compose のまま永続化する方法:
+  ```bash
+  # コンテナを起動
+  docker compose up -d bci
+  # 自動再起動ポリシーを設定
+  docker update --restart=unless-stopped $(docker compose ps -q bci)
+  ```
+
+### 推奨フロー
+1. 管理者にユニット設置を依頼する（最も確実）。
+2. すぐに使いたい場合は、5) の方法で Docker Compose のまま永続化する（`systemd` なし）。
+
+必要なら、こちらで管理者用のコマンド列を整形して渡すテンプレートを作成します。
+
+## 今回行った変更と現在の構成（要約）
+
+- 変更点
+  - `main.py` を改良して、LLM の出力から精度を抽出・保存し、目標精度に達するまで自己修正フローを回せるようにしました（`TARGET_ACC` で閾値設定可）。
+  - `Dockerfile` を修正し、重いサイエンスパッケージは `mamba` を用いた分割インストール／ビルド引数で制御できるようにしました。`ARG INSTALL_SCIENCE_PACKAGES`／`ARG INSTALL_EEG_PACKAGES` によりビルド時インストールを切替可能です。
+  - `docker-compose.yml` を更新して、ローカルビルドを有効化し、`restart: unless-stopped` を追加しました（サービスは永続起動可能）。
+  - コンテナ内で手動インストール→イメージ化するためのスクリプト `scripts/interactive_install_and_commit.sh` を追加しました。
+  - systemd ユニット `systemd/agent-bci.service` を追加（管理者が `/etc/systemd/system` に配置して有効化することを想定）。
+  - `README.md` に sudo/systemd の注意と手順を追加しました。
+
+- 現在の稼働構成
+  - Compose サービス名: `bci`（イメージ: `agent-bci-llm:latest`）
+  - コンテナ動作: `docker compose up -d bci`（イメージがなければローカルでビルドされます）
+  - 自動再起動: `unless-stopped` を設定済み（`docker update --restart=unless-stopped <container>`）
+  - systemd: 管理者が `systemd/agent-bci.service` を `/etc/systemd/system` に配置すれば OS 起動時に自動でコンテナ起動可能
+
+## コンテナが down した場合の対応手順
+
+1. まず状態を確認:
+```bash
+docker compose ps
+docker logs $(docker compose ps -q bci) --tail 200
+```
+
+2. コンテナが停止している／Exit 状態の場合は再起動:
+```bash
+docker compose up -d bci
+```
+
+3. 再起動ポリシーが機能していない場合（手動で設定する）:
+```bash
+docker update --restart=unless-stopped $(docker compose ps -q bci)
+```
+
+4. systemd 管理下にある場合は systemd の状態確認／再起動:
+```bash
+sudo systemctl status agent-bci.service --no-pager
+sudo systemctl restart agent-bci.service
+sudo journalctl -u agent-bci.service -n 200 --no-pager
+```
+
+5. イメージを最新に差し替えたい場合（コミット済みイメージを反映）:
+```bash
+docker compose pull || true
+docker compose up -d --force-recreate bci
+```
+
+6. ログや原因が分からない場合は、最近のログ（`docker logs` / `journalctl`）をまず確認し、必要なら `docker exec -it <container> bash` で直接デバッグしてください。
+
+
 
 上の手順を `README` に追記しました。必要なら自動化用の起動スクリプト（`scripts/up.sh` など）を作成してお渡しします。
 

@@ -12,7 +12,7 @@ services:
       - /home/kawamura/bci_project/braindecodetest:/mnt/bci_source:ro
       # ホストで pull した Ollama モデルをコンテナ内にマウント（読み取り専用）
       # Mount under /mnt so non-root container user can access it
-      - /home/kawamura/.ollama:/mnt/ollama:ro
+      - /usr/share/ollama/.ollama:/mnt/ollama:ro
     deploy:
       resources:
         reservations:
@@ -25,6 +25,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - WORKSPACE_DIR=/tmp/agent_workspace
+      - TARGET_PYTHON=python
       - OLLAMA_MODELS=/mnt/ollama
       - OLLAMA_HOST=127.0.0.1:11434
       - MLFLOW_TRACKING_URI=file:///tmp/mlruns
