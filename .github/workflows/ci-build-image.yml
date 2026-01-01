@@ -1,0 +1,84 @@
+name: CI - Build and Push agent image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_name:
+        description: 'Image name (repo/image or ghcr.io/org/image)'
+        required: true
+        default: 'ghcr.io/${{ github.repository_owner }}/agent-bci-llm'
+      image_tag:
+        description: 'Image tag'
+        required: true
+        default: 'latest'
+      push:
+        description: 'Push image to registry?'
+        required: true
+        default: 'true'
+      use_self_hosted:
+        description: 'Run on self-hosted runner? (true/false)'
+        required: true
+        default: 'false'
+      install_science:
+        description: 'Set INSTALL_SCIENCE_PACKAGES build arg'
+        required: true
+        default: 'true'
+      install_llm:
+        description: 'Set INSTALL_LLM_PACKAGES build arg'
+        required: true
+        default: 'true'
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ${{ inputs.use_self_hosted == 'true' && 'self-hosted' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Login to registry
+      id: login
+      run: |
+        IMAGE=${{ inputs.image_name }}
+        if echo "$IMAGE" | grep -q "ghcr.io"; then
+          echo "Logging into GHCR"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+        else
+          # Expect DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets for Docker Hub
+          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ] || [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "Docker Hub credentials not found in secrets. Skip login." && exit 1
+          fi
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+        fi
+
+    - name: Build and push (docker/build-push-action)
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: ${{ fromJson(inputs.push) }}
+        tags: |
+          ${{ inputs.image_name }}:${{ inputs.image_tag }}
+        build-args: |
+          INSTALL_SCIENCE_PACKAGES=${{ inputs.install_science }}
+          INSTALL_LLM_PACKAGES=${{ inputs.install_llm }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Upload build log (action runner log)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-build-log
+        path: |
+          ./
+        retention-days: 3
