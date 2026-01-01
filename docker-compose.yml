@@ -1,10 +1,14 @@
 services:
   bci:
-    build: .
+    image: agent-bci-llm:latest
+    network_mode: host
     volumes:
       - .:/app
       # ホストのデータセットディレクトリをマウント (Read-Only)
       - /home/kawamura/bci_project/braindecodetest:/mnt/bci_source:ro
+      # ホストで pull した Ollama モデルをコンテナ内にマウント（読み取り専用）
+      # Mount under /mnt so non-root container user can access it
+      - /home/kawamura/.ollama:/mnt/ollama:ro
     deploy:
       resources:
         reservations:
@@ -16,10 +20,13 @@ services:
     stdin_open: true
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_HOST=http://host.docker.internal:11434
+      - WORKSPACE_DIR=/tmp/agent_workspace
+      - OLLAMA_MODELS=/mnt/ollama
+      - OLLAMA_HOST=127.0.0.1:11434
       - MLFLOW_TRACKING_URI=file:///tmp/mlruns
       - MPLCONFIGDIR=/tmp/matplotlib
     user: "10151:200"
+    # Using host networking so extra_hosts is not required
 
   mlflow_server:
     image: ghcr.io/mlflow/mlflow
