@@ -155,3 +155,84 @@ docker exec -it $(docker compose ps -q bci) /bin/bash -c "python3 /app/main.py" 
 ---
 
 上の手順を `README` に追記しました。必要なら自動化用の起動スクリプト（`scripts/up.sh` など）を作成してお渡しします。
+
+## CI: Build image on a build server (GitHub Actions)
+
+To reliably bake the heavy science and LLM dependencies into an image, use the provided GitHub Actions workflow to build on a larger build host and push to a registry.
+
+- Workflow path: `.github/workflows/ci-build-image.yml`
+- Inputs (when triggering `workflow_dispatch`): `image_name`, `image_tag`, `push`, `use_self_hosted`, `install_science`, `install_llm`.
+
+Required secrets:
+- For GHCR (recommended): `GITHUB_TOKEN` is used automatically by Actions.
+- For Docker Hub: set `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` in repository Secrets.
+
+Trigger example (from Actions UI):
+- `image_name`: `ghcr.io/<your-org>/agent-bci-llm`
+- `image_tag`: `latest`
+- `push`: `true`
+- `use_self_hosted`: `true` (if you have a large self-hosted runner)
+
+Notes:
+- GitHub-hosted runners have limited RAM; for large builds set `use_self_hosted=true` and run on a machine with sufficient RAM (>=32GB recommended).
+- The workflow uses `docker/build-push-action` with build-args `INSTALL_SCIENCE_PACKAGES` and `INSTALL_LLM_PACKAGES` to enable heavy installs.
+
+
+**Session Handoff**
+
+- **Last agent output (from attaching to container and running `main.py`):**
+
+```
+[agent] Tail last 200 lines of bci logs (press Ctrl-C to stop):
+[agent] Attaching and running /app/main.py inside container 39c670de74f3c8d50b18399b2416e78a915f57ec2146a0e7cc532adb2accc373
+🚀 Initializing Agent with deepseek-r1:14b...
+🐍 Target Python: /data/kawamura/miniforge3/envs/bci2020/bin/python
+🚀 System Ready! (Model: deepseek-r1:14b)
+Type 'exit' or 'quit' to end.
+
+USER> Understand this workspace and summarise what's inside.
+```
+
+- **Implemented (what the current workspace / image can do):**
+  - **Agent runtime:** Container `bci` can run `python3 /app/main.py` and reach `System Ready! (Model: deepseek-r1:14b)`.
+  - **Ollama integration:** Host Ollama is reachable from the container (we used `network_mode: host`); `ollama run deepseek-r1:14b 'Hello'` returns a valid text response.
+  - **Docs & automation:** `README.md` updated with Quick Start and Troubleshooting; `scripts/up.sh` was added to automate build/pull/up/attach flows.
+  - **Manual fixes:** Missing Python/LangGraph dependencies were identified and can be installed inside the running container; a committed image `agent-bci-llm:latest` exists in the workflow.
+
+- **Not implemented / Known issues (what still needs attention):**
+  - **`scripts/up.sh` permissions:** Created but the non-root `testuser` cannot mark it executable in-place (permission denied). Fix requires owner/permission change by a user with appropriate rights.
+  - **Trusted Python path missing:** The runtime shows `TARGET_PYTHON`/agent expects `/data/kawamura/miniforge3/envs/bci2020/bin/python` which does not exist in the runtime environment; this causes executor tasks (e.g., `run_eeg_experiment`) to fail with `No such file or directory` errors.
+  - **Incomplete image bake:** Large science and LLM packages are not fully baked into a reproducible image (they were installed manually in a container and committed). This is fragile for CI/other hosts.
+  - **Missing serve.log:** `/home/kawamura/.ollama/serve.log` was not present during log collection; this may limit post-mortem diagnostics.
+  - **Operational dependency on host networking:** Current setup relies on `network_mode: host` to access a host-bound Ollama; this reduces portability and increases security considerations.
+
+- **Action items for next Copilot session / handoff checklist:**
+  - **Fix `scripts/up.sh` execution permissions:** Either change ownership/permissions or provide a wrapper invocation (e.g., `bash scripts/up.sh`) and document sudo requirements.
+  - **Provide or configure `bci2020` Python environment:** Create the conda env on host (or adjust `TARGET_PYTHON`) and add steps to `README` to create/install required packages, or bake them into the Docker image.
+  - **Bake final image on CI:** Run `docker build --build-arg INSTALL_SCIENCE_PACKAGES=true --build-arg INSTALL_LLM_PACKAGES=true -t agent-bci-llm:latest .` on a machine with adequate RAM and publish to a private registry.
+  - **Add `scripts/down.sh`:** Provide a clean stop/cleanup script to bring services down and optionally remove dangling images/containers.
+  - **Automate Ollama startup or document:** Provide a reproducible way to start Ollama (systemd unit or containerized Ollama) so local `127.0.0.1` binding doesn't force host-network mode.
+  - **Collect serve.log location / rotate logs:** Ensure Ollama is configured to write `serve.log` to a known path and that log rotate/retention is documented.
+
+- **Quick commands to hand off to the next session**
+
+```bash
+# Run the helper (no exec bit required if you use bash explicitly)
+bash scripts/up.sh --pull-model --attach
+
+# If you need to set executable bit (run as a user with write perms to the repo):
+sudo chown $(whoami):$(id -gn) scripts/up.sh || true
+chmod +x scripts/up.sh
+
+# Create the missing conda env example (if TARGET_PYTHON should point here):
+conda create -n bci2020 python=3.11 -y
+conda activate bci2020
+pip install -r requirements_docker.txt
+
+# Bake final image on a build host with enough RAM:
+docker build --build-arg INSTALL_SCIENCE_PACKAGES=true --build-arg INSTALL_LLM_PACKAGES=true -t agent-bci-llm:latest .
+```
+
+---
+
+This section is intended for the next Copilot session or developer picking up the task; it captures the last observed runtime output and the precise set of implemented vs outstanding items to continue work without re-running discovery steps.
