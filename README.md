@@ -357,6 +357,21 @@ pip install -r requirements_docker.txt
 docker build --build-arg INSTALL_SCIENCE_PACKAGES=true --build-arg INSTALL_LLM_PACKAGES=true -t agent-bci-llm:latest .
 ```
 
+## 5. Recent PR & Communication
+- **PR branch:** prepcompexp-clone
+- **Action:** PR created to merge runtime fixes, Ollama HTTP detection fallback, `TARGET_PYTHON` env override, and README updates (Japanese quick start & debugging).
+- **Suggested next steps:** review the PR, run CI build (`ci-build-image.yml`) on a machine with sufficient RAM, and merge when checks pass.
+
+### Gemini Notification Prompt
+以下のプロンプトを Gemini（LLM）へ投げて、今回の変更内容とデプロイ準備の要点を通知してください。
+
+Japanese prompt (copy-and-paste):
+"あなたはこのリポジトリの運用担当です。以下の要点を理解して、CIでのイメージビルド実行のためのチェックリストを作成してください：\n- ブランチ: prepcompexp-clone\n- 変更: `main.py` に `TARGET_PYTHON` の環境変数対応と Ollama HTTP フォールバック追加、`docker-compose.yml` に `TARGET_PYTHON=python` を追加、`README.md` に日本語のクイックスタート/デバッグ追記\n- 現在の制約: 一部ファイルの所有権がホストで変更不可（sudo 必要）、CI ビルドは大容量メモリを推奨\n- 期待する出力: (1) CI ビルドで必要な事前チェックリスト、(2) マージ後のデプロイ手順（安全な順序で）、(3) ビルド失敗時に収集すべきログと診断コマンド\n出力は日本語で、箇条書きか短い段落で簡潔に提供してください。"
+
+English prompt (short):
+"You are the ops engineer for this repository. Summarize the changes on branch `prepcompexp-clone` and produce: (1) a pre-merge CI checklist, (2) post-merge deploy steps, and (3) clear log/diagnostic commands to run if a build fails. Keep it concise and actionable."
+
+
 ---
 
 This section is intended for the next Copilot session or developer picking up the task; it captures the last observed runtime output and the precise set of implemented vs outstanding items to continue work without re-running discovery steps.
