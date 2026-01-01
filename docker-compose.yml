@@ -1,6 +1,10 @@
 services:
   bci:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: agent-bci-llm:latest
+    restart: unless-stopped
     network_mode: host
     volumes:
       - .:/app
