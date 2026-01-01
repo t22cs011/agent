@@ -16,3 +16,8 @@ tqdm==4.67.1
 # Tools
 jupyterlab>=4.0.0
 ipywidgetsmlflow
+
+# LLM client
+langchain-ollama
+langchain-core
+ollama

@@ -4,7 +4,7 @@ import re
 import operator
 import sys
 import time
-from typing import TypedDict, Annotated, List
+from typing import TypedDict, Annotated, List, Optional
 
 # --- ライブラリのインポート修正 ---
 HAS_FRAMEWORK = True
@@ -16,6 +16,18 @@ except Exception as e:
     HAS_FRAMEWORK = False
     IMPORT_ERROR_MSG = str(e)
     # We'll provide a fallback interactive loop later so the script still accepts input.
+
+# Minimal fallbacks to avoid NameError when framework imports are unavailable
+if not HAS_FRAMEWORK:
+    class BaseMessage:
+        def __init__(self, content: Optional[str] = None):
+            self.content = content or ""
+
+    class HumanMessage(BaseMessage):
+        pass
+
+    class SystemMessage(BaseMessage):
+        pass
 
 EEG_TOOL_IMPORT_ERROR: str | None = None
 try:
@@ -32,7 +44,7 @@ except Exception as exc:
 TARGET_PYTHON = "/data/kawamura/miniforge3/envs/bci2020/bin/python"
 
 # 2. 作業ディレクトリ (Workspace)
-WORKSPACE_DIR = "/home/kawamura/agent"
+WORKSPACE_DIR = os.environ.get('WORKSPACE_DIR', "/home/kawamura/agent")
 
 # 3. 使用するLLMモデル
 # 思考過程を見るため、DeepSeek-R1系を使用
@@ -137,11 +149,22 @@ def preflight_checks():
     model_present = False
     details['checks'] = {}
 
-    # 1) サーバが返す model list（デフォルト）
+    # 1) サーバが返す model list（デフォルト） -- if CLI isn't available, try HTTP port check instead
     code_svc, out_svc = run_cmd('ollama list')
     details['checks']['ollama_list_default'] = out_svc
     service_available = (code_svc == 0)
-    if service_available and LLM_MODEL in out_svc:
+    if not service_available:
+        # try simple TCP probe to common host targets (host.docker.internal resolves on Linux with host-gateway)
+        try_hosts = [os.environ.get('OLLAMA_HOST', '').replace('http://', '').split(':')[0] if os.environ.get('OLLAMA_HOST') else 'host.docker.internal', '127.0.0.1']
+        for h in try_hosts:
+            try:
+                if tcp_port_open(h, 11434, timeout=0.5):
+                    service_available = True
+                    details['checks']['tcp_probe'] = f'port 11434 open on {h}'
+                    break
+            except Exception:
+                pass
+    if service_available and out_svc and LLM_MODEL in out_svc:
         model_present = True
 
     # 2) OLLAMA_MODELS 環境変数または候補パスで確認
@@ -156,17 +179,23 @@ def preflight_checks():
     for c in candidates:
         if not c:
             continue
-        cmd = f'OLLAMA_MODELS={c} ollama list'
-        code_c, out_c = run_cmd(cmd)
-        details['checks'][f'ollama_list_{c}'] = out_c
-        lower_c = (out_c or '').lower()
-        if 'permission denied' in lower_c or 'ensure path elements' in lower_c:
-            details['permission_issues'].append({'path': c, 'output': out_c})
-        if LLM_MODEL in out_c:
-            model_present = True
-            # prefer that models_dir
-            details['model_dir_found'] = c
-            break
+        # prefer filesystem check of mounted models dir (no need for CLI)
+        models_dir = os.path.join(c, 'models')
+        details['checks'][f'ollama_models_dir_{c}'] = ''
+        try:
+            if os.path.isdir(models_dir):
+                details['checks'][f'ollama_models_dir_{c}'] = ','.join(os.listdir(models_dir)[:20])
+                # check for model name prefix (before ':' tag)
+                model_prefix = LLM_MODEL.split(':')[0]
+                for entry in os.listdir(models_dir):
+                    if model_prefix in entry:
+                        model_present = True
+                        details['model_dir_found'] = c
+                        break
+                if model_present:
+                    break
+        except PermissionError as e:
+            details['permission_issues'].append({'path': c, 'output': str(e)})
 
     # check default server output for permission errors as well
     if code_svc != 0:
