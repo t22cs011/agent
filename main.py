@@ -43,6 +43,8 @@ except Exception as exc:
 # 1. 実行部隊 (bci2020) のPythonパス
 TARGET_PYTHON = "/data/kawamura/miniforge3/envs/bci2020/bin/python"
 
+# 1.1 目標精度 (環境変数で上書き可)
+TARGET_ACC = float(os.environ.get('TARGET_ACC', '0.8'))
 # 2. 作業ディレクトリ (Workspace)
 WORKSPACE_DIR = os.environ.get('WORKSPACE_DIR', "/home/kawamura/agent")
 
@@ -307,7 +309,56 @@ try:
             except Exception as e:
                 print('\n⚠️ LLM クライアントライブラリの初期化に失敗しました:')
                 print(e)
-                FULL_AGENT = False
+                # Try to use langchain chat models as a replacement if available
+                try:
+                    from langchain.chat_models import ChatOpenAI
+                    from langchain.schema import HumanMessage as LCHumanMessage, SystemMessage as LCSystemMessage
+
+                    class LangChainAdapter:
+                        def __init__(self, model):
+                            self.model = model
+
+                        def invoke(self, messages):
+                            lc_msgs = []
+                            for m in messages:
+                                content = getattr(m, 'content', '') or ''
+                                if isinstance(m, SystemMessage):
+                                    lc_msgs.append(LCSystemMessage(content=content))
+                                else:
+                                    lc_msgs.append(LCHumanMessage(content=content))
+                            try:
+                                if hasattr(self.model, 'predict_messages'):
+                                    resp = self.model.predict_messages(lc_msgs)
+                                    return HumanMessage(content=getattr(resp, 'content', str(resp)))
+                                if hasattr(self.model, '__call__'):
+                                    out = self.model.__call__(lc_msgs)
+                                    if isinstance(out, str):
+                                        return HumanMessage(content=out)
+                                    return HumanMessage(content=getattr(out, 'content', str(out)))
+                                if hasattr(self.model, 'generate'):
+                                    gen = self.model.generate([lc_msgs])
+                                    text = ''
+                                    if getattr(gen, 'generations', None):
+                                        try:
+                                            text = gen.generations[0][0].text
+                                        except Exception:
+                                            text = str(gen)
+                                    else:
+                                        text = str(gen)
+                                    return HumanMessage(content=text)
+                            except Exception as ex:
+                                return HumanMessage(content=f"LangChain model error: {ex}")
+
+                    lc_model = ChatOpenAI(temperature=0)
+                    llm = LangChainAdapter(lc_model)
+                    print('✅ Using LangChain Chat model as LLM backend.')
+                    FULL_AGENT = True
+                except Exception as ex2:
+                    print('\n❌ LangChain chat models are not available:')
+                    print(ex2)
+                    print('\nPlease install LangChain and a supported chat provider (e.g. OpenAI) in the Python environment:')
+                    print('  pip install langchain openai')
+                    FULL_AGENT = False
     else:
         FULL_AGENT = False
 except Exception as e:
@@ -319,14 +370,21 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     code_filename: str
     iterations: int
+    metrics: Optional[dict]
 
 # --- Node: Coder ---
 def coder_node(state: AgentState):
     messages = state["messages"]
     print(f"\n--- 🤖 Coder ({LLM_MODEL}) is thinking & coding ---\n")
-    
+    # 強化プロンプト: 必ず python のコードブロックを出力させる
+    strong_system = SystemMessage(content=(
+        "IMPORTANT: Always output a runnable Python script inside a single ```python ... ``` code block. "
+        "Do not output only thoughts. Provide the complete implementation and ensure the code can be executed with the target Python."
+    ))
+
     # LLMに指示を投げる（ストリーミングで表示される）
-    response = llm.invoke(messages)
+    messages_with_instruction = [strong_system] + messages
+    response = llm.invoke(messages_with_instruction)
     
     # ストリーミング後は改行を入れて見やすくする
     print("\n\n--------------------------------------------------")
@@ -345,13 +403,23 @@ def executor_node(state: AgentState):
     print(f"\n⚙️ Executor: Extracting code for {filename}...")
 
     # Markdownのコードブロックを抽出
-    # DeepSeekは <think> タグなどを出すため、確実に python ブロックだけを狙う
-    code_match = re.search(r"```python(.*?)```", last_message, re.DOTALL)
-    
+    # DeepSeekは <think> タグなどを出すため、まずは ```python ``` を優先、それがなければ任意のコードブロックを許容する
+    code_match = re.search(r"```python(.*?)```", last_message, re.DOTALL | re.IGNORECASE)
+
+    if not code_match:
+        # try any code block
+        code_match = re.search(r"```(.*?)```", last_message, re.DOTALL)
+        if code_match:
+            print("⚠️ Found code block without language; assuming python.")
+
+    if not code_match:
+        # try simple <python>...</python> tags
+        code_match = re.search(r"<python>(.*?)</python>", last_message, re.DOTALL | re.IGNORECASE)
+
     if not code_match:
         print("⚠️ No code block found.")
-        return {"messages": [HumanMessage(content="Error: No python code block found. Please wrap code in ```python ... ```.")]}
-    
+        return {"messages": [HumanMessage(content="Error: No python code block found. Please wrap code in ```python ... ```.")]} 
+
     code = code_match.group(1).strip()
 
     # --- 🛡️ 安全装置 ---
@@ -383,33 +451,68 @@ def executor_node(state: AgentState):
         )
         
         output = result.stdout + result.stderr
+        # ログから精度を抽出する (柔軟にマッチ)
+        acc_match = re.search(r"(?:Accuracy|overall_mean_acc|overall mean acc)[\s:=]*([0-9]*\.?[0-9]+)", output, re.IGNORECASE)
+        accuracy = None
+        if acc_match:
+            try:
+                accuracy = float(acc_match.group(1))
+            except Exception:
+                accuracy = None
+        # state に metrics を保存
+        state_metrics = state.get('metrics', {}) or {}
+        if accuracy is not None:
+            state_metrics['accuracy'] = accuracy
+        state['metrics'] = state_metrics
         
         if result.returncode == 0:
             print("✅ Execution Success")
             # 出力が長すぎる場合は省略して表示
             disp_output = output[:500] + "..." if len(output) > 500 else output
             print(f"Output:\n{disp_output}")
-            return {"messages": [HumanMessage(content=f"Execution Success! Output:\n{output}")]}
+            if accuracy is not None:
+                return {"messages": [HumanMessage(content=f"Execution Success! Output:\n{output}\nDetected accuracy: {accuracy}")], "metrics": state.get('metrics'), "iterations": state["iterations"] + 1}
+            else:
+                return {"messages": [HumanMessage(content=f"Execution Success! Output:\n{output}")], "metrics": state.get('metrics'), "iterations": state["iterations"] + 1}
         else:
             print("❌ Execution Failed")
             print(f"Error:\n{output}")
-            return {"messages": [HumanMessage(content=f"Execution Failed:\n{output}\nPlease fix the code.")]}
+            # 失敗時も metrics が取れていれば LLM にフィードバックする
+            if state.get('metrics') and state['metrics'].get('accuracy') is not None:
+                acc_val = state['metrics']['accuracy']
+                feedback = (
+                    f"Current accuracy was {acc_val:.4f}, which is below target {TARGET_ACC}. "
+                    "Please modify hyperparameters (lr, epochs, batch_size) to improve accuracy and provide a new runnable script."
+                )
+                return {"messages": [HumanMessage(content=f"Execution Failed:\n{output}\n{feedback}")], "metrics": state.get('metrics'), "iterations": state["iterations"] + 1}
+            return {"messages": [HumanMessage(content=f"Execution Failed:\n{output}\nPlease fix the code.")], "iterations": state["iterations"] + 1}
             
     except Exception as e:
         print(f"❌ System Error: {e}")
-        return {"messages": [HumanMessage(content=f"System Error: {str(e)}")]}
+        return {"messages": [HumanMessage(content=f"System Error: {str(e)}")], "iterations": state["iterations"] + 1}
 
 # --- 終了判定 ---
 def should_continue(state: AgentState):
+    # 終了判定を精度ベースに変更
+    metrics = state.get('metrics') or {}
+    acc = metrics.get('accuracy')
+    if acc is not None:
+        if acc >= TARGET_ACC:
+            print(f"✅ Target accuracy reached: {acc} >= {TARGET_ACC}")
+            return END
+        else:
+            print(f"🔄 Accuracy {acc} < {TARGET_ACC}, continuing to coder.")
+            return "coder"
+
+    # フォールバック: 実行成功メッセージを基に終了判定
     last_message = state["messages"][-1]
-    
     if isinstance(last_message, HumanMessage) and "Execution Success" in last_message.content:
         return END
-    
+
     if state["iterations"] > 5:
         print("🛑 Max iterations reached.")
         return END
-    
+
     return "coder"
 
 if FULL_AGENT:
