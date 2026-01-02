@@ -1,3 +1,33 @@
+# Python cache and environments
+__pycache__/
+*.py[cod]
+.Python
+env/
+venv/
+.venv/
+
+# Model and checkpoint files
+*.pt
+*.pth
+*.ckpt
+
+# Images and large media
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+
+# Jupyter and editor
+.ipynb_checkpoints/
+.vscode/
+
+# OS
+.DS_Store
+
+# Logs and temporary
+*.log
+tmp/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
