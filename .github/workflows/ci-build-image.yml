@@ -6,7 +6,7 @@ on:
       image_name:
         description: 'Image name (repo/image or ghcr.io/org/image)'
         required: true
-        default: 'ghcr.io/${{ github.repository_owner }}/agent-bci-llm'
+        default: 'ghcr.io/t22cs011/agent-bci-llm'
       image_tag:
         description: 'Image tag'
         required: true
