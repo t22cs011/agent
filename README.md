@@ -357,6 +357,25 @@ pip install -r requirements_docker.txt
 docker build --build-arg INSTALL_SCIENCE_PACKAGES=true --build-arg INSTALL_LLM_PACKAGES=true -t agent-bci-llm:latest .
 ```
 
+## Recent Recovery Note
+
+- On this workstation we encountered local `.git` permission issues that prevented committing directly into the checked-out repository. To recover, a writable HTTPS clone was created at `/tmp/agent-clone` and all fixes and PR work were performed there.
+- A Pull Request (#8) was created from `prepcompexp-clone` and successfully merged into `main` (merge commit: `d15e2cfe...`).
+- A CI test run was triggered and completed successfully (example run id: `20637811531`).
+- Local uncommitted/staged edits from the original worktree were backed up as patches:
+  - `/tmp/staged-changes.patch` (staged changes snapshot)
+  - `/tmp/unstaged-changes.patch` (unstaged changes snapshot)
+- If you want to re-apply any of the backed-up edits into this repository, run:
+
+```bash
+# from repository root
+git apply /tmp/staged-changes.patch
+# or
+git apply /tmp/unstaged-changes.patch
+```
+
+This note documents the recovery steps taken during the recent session so future developers understand why a temporary clone was used.
+
 ## 5. Recent PR & Communication
 - **PR branch:** prepcompexp-clone
 - **Action:** PR created to merge runtime fixes, Ollama HTTP detection fallback, `TARGET_PYTHON` env override, and README updates (Japanese quick start & debugging).
